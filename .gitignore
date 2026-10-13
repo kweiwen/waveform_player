@@ -1,0 +1,17 @@
+# Build products, Xcode intermediates and generated build scripts
+build/
+DerivedData/
+TestResults/
+
+# Xcode per-user settings
+xcuserdata/
+*.xcuserstate
+
+# macOS metadata
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+
+# Local diagnostic output
+valgrind.log
