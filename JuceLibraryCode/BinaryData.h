@@ -26,6 +26,9 @@ namespace BinaryData
     extern const char*   loop_svg;
     const int            loop_svgSize = 678;
 
+    extern const char*   folder2_svg;
+    const int            folder2_svgSize = 460;
+
     extern const char*   folder2open_svg;
     const int            folder2open_svgSize = 619;
 
@@ -54,7 +57,7 @@ namespace BinaryData
     const int            PlayBold_ttfSize = 194848;
 
     // Number of elements in the namedResourceList and originalFileNames arrays.
-    const int namedResourceListSize = 15;
+    const int namedResourceListSize = 16;
 
     // Points to the start of a list of resource names.
     extern const char* namedResourceList[];

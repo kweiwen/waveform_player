@@ -27,6 +27,7 @@
         <FILE id="WfRes4" name="fast-forward-btn.svg" compile="0" resource="1"
               file="Resource/SVG/fast-forward-btn.svg"/>
         <FILE id="WfRes5" name="loop.svg" compile="0" resource="1" file="Resource/SVG/loop.svg"/>
+        <FILE id="WfClosedSvg" name="folder2.svg" compile="0" resource="1" file="Resource/SVG/folder2.svg"/>
         <FILE id="WfOpenSvg" name="folder2-open.svg" compile="0" resource="1"
               file="Resource/SVG/folder2-open.svg"/>
         <FILE id="WfVolOff" name="volume-off.svg" compile="0" resource="1"

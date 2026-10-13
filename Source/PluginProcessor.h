@@ -17,6 +17,7 @@ public:
     {
         bool loaded = false;
         bool loading = false;
+        bool choosingFile = false;
         bool playing = false;
         double positionSeconds = 0.0;
         double durationSeconds = 0.0;
@@ -55,7 +56,7 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     // File selection is message-thread only. Decoding runs on the loader thread.
-    void chooseAudioFile();
+    void chooseAudioFile (bool useNativeDialog = true);
     void loadAudioFile (const juce::File& file);
     void play();
     void pause();
@@ -121,6 +122,7 @@ private:
     std::atomic<float>* muteParameter = nullptr;
     std::atomic<float>* speedParameter = nullptr;
     std::unique_ptr<juce::FileChooser> fileChooser;
+    std::atomic<bool> choosingFile { false };
 
     mutable std::mutex metadataMutex;
     PlaybackSnapshot metadata;

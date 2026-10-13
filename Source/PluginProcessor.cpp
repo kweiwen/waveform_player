@@ -346,6 +346,7 @@ WaveformPlayerAudioProcessor::PlaybackSnapshot WaveformPlayerAudioProcessor::get
         result = metadata;
     }
     result.playbackSpeed = getPlaybackSpeed();
+    result.choosingFile = choosingFile.load (std::memory_order_relaxed);
     if (! result.loaded)
         return result;
 
@@ -365,17 +366,32 @@ WaveformPlayerAudioProcessor::PlaybackSnapshot WaveformPlayerAudioProcessor::get
 
 juce::File WaveformPlayerAudioProcessor::getLoadedFile() const { return getPlaybackSnapshot().file; }
 
-void WaveformPlayerAudioProcessor::chooseAudioFile()
+void WaveformPlayerAudioProcessor::chooseAudioFile (bool useNativeDialog)
 {
+    if (choosingFile.load (std::memory_order_relaxed) || getPlaybackSnapshot().loading)
+        return;
+
     fileChooser = std::make_unique<juce::FileChooser> (
-        "Open audio file", juce::File::getSpecialLocation (juce::File::userMusicDirectory), "*.wav;*.mp3;*.flac");
-    fileChooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-        [this] (const juce::FileChooser& chooser)
-        {
-            const auto file = chooser.getResult();
-            if (file != juce::File())
-                loadAudioFile (file);
-        });
+        "Open audio file", juce::File::getSpecialLocation (juce::File::userMusicDirectory),
+        "*.wav;*.mp3;*.flac", useNativeDialog);
+    choosingFile.store (true, std::memory_order_relaxed);
+    try
+    {
+        fileChooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+            [this] (const juce::FileChooser& chooser)
+            {
+                const auto file = chooser.getResult();
+                choosingFile.store (false, std::memory_order_relaxed);
+                if (file != juce::File())
+                    loadAudioFile (file);
+            });
+    }
+    catch (...)
+    {
+        choosingFile.store (false, std::memory_order_relaxed);
+        fileChooser.reset();
+        throw;
+    }
 }
 
 void WaveformPlayerAudioProcessor::loadAudioFile (const juce::File& file) { requestAudioFile (file, 0.0); }

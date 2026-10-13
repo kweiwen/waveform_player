@@ -84,7 +84,7 @@ public:
         loadIcon (3, "stop", BinaryData::stopbtn_svg, BinaryData::stopbtn_svgSize);
         loadIcon (4, "forward", BinaryData::fastforwardbtn_svg, BinaryData::fastforwardbtn_svgSize);
         loadIcon (5, "loop", BinaryData::loop_svg, BinaryData::loop_svgSize);
-        loadIcon (6, "open", BinaryData::folder2open_svg, BinaryData::folder2open_svgSize);
+        loadIcon (6, "open", BinaryData::folder2_svg, BinaryData::folder2_svgSize);
         loadIcon (7, "speed1", BinaryData::_1circle_svg, BinaryData::_1circle_svgSize);
         loadIcon (8, "speed2", BinaryData::_2circle_svg, BinaryData::_2circle_svgSize);
         loadIcon (9, "speed4", BinaryData::_4circle_svg, BinaryData::_4circle_svgSize);
@@ -92,6 +92,7 @@ public:
         loadIcon (11, "volume-up", BinaryData::volumeup_svg, BinaryData::volumeup_svgSize);
         loadIcon (12, "volume-mute", BinaryData::volumemute_svg, BinaryData::volumemute_svgSize);
         loadIcon (13, "volume-off", BinaryData::volumeoff_svg, BinaryData::volumeoff_svgSize);
+        loadIcon (14, "folder-open", BinaryData::folder2open_svg, BinaryData::folder2open_svgSize);
     }
 
     juce::Typeface::Ptr getTypefaceForFont (const juce::Font&) override { return interfaceTypeface; }
@@ -103,7 +104,9 @@ public:
         const auto highlightedOrActive = highlighted || button.getToggleState() || button.hasKeyboardFocus (true);
         const auto opacity = button.isEnabled() ? highlightedOrActive ? 1.0f : 0.85f : 0.25f;
         const auto isMuteButton = button.getComponentID() == "mute";
+        const auto isFolderButton = button.getComponentID() == "open";
         const auto iconId = isMuteButton ? juce::String (button.getToggleState() ? "volume-mute" : "volume-up")
+                         : isFolderButton ? juce::String (button.getToggleState() ? "folder-open" : "open")
                                          : button.getComponentID();
         for (const auto& icon : icons)
         {
@@ -114,7 +117,7 @@ public:
                 const auto centreY = static_cast<float> (button.getHeight()) * 0.5f + (down ? 1.0f : 0.0f);
                 const auto size = static_cast<float> (svgCanvasSize);
                 drawSvgIcon (g, *drawable, { centreX - size * 0.5f, centreY - size * 0.5f, size, size }, opacity);
-                if (button.getToggleState() && ! isMuteButton)
+                if (button.getToggleState() && ! isMuteButton && ! isFolderButton)
                 {
                     g.setColour (textPrimary.withAlpha (opacity));
                     g.fillEllipse (centreX - 1.5f, static_cast<float> (button.getHeight()) - 4.0f, 3.0f, 3.0f);
@@ -210,7 +213,7 @@ private:
     }
 
     juce::Typeface::Ptr interfaceTypeface;
-    std::array<Icon, 14> icons;
+    std::array<Icon, 15> icons;
 };
 
 class WaveformPlayerAudioProcessorEditor::WaveformDisplay final : public juce::Component,
@@ -258,10 +261,12 @@ public:
 
         loaded = snapshot.loaded;
         loading = snapshot.loading;
-        if (! loaded || loading)
+        choosingFile = snapshot.choosingFile;
+        if (! loaded || loading || choosingFile)
             dragging = false;
         duration = snapshot.durationSeconds;
         sampleRate = snapshot.fileSampleRate;
+        playbackSpeed = snapshot.playbackSpeed;
         if (! dragging)
             position = snapshot.positionSeconds;
         fileNameLabel.setText (snapshot.loaded ? snapshot.fileName : "No audio file loaded", juce::dontSendNotification);
@@ -274,7 +279,7 @@ public:
         fileStatusLabel.setTooltip (status);
         fileStatusLabel.setDescription (status);
         fileStatusLabel.setColour (juce::Label::textColourId, snapshot.error.isNotEmpty() ? errorColour : textSecondary);
-        setMouseCursor (loaded && ! loading ? juce::MouseCursor::LeftRightResizeCursor
+        setMouseCursor (loaded && ! loading && ! choosingFile ? juce::MouseCursor::LeftRightResizeCursor
                                            : juce::MouseCursor::NormalCursor);
         repaint();
     }
@@ -304,6 +309,8 @@ public:
         g.setColour (textSecondary);
         g.drawText (loaded ? juce::String (sampleRate / 1000.0, 1) + juce::String::fromUTF8 (" kHz · ")
                             + juce::String::fromUTF8 (channelCount == 1 ? "Mono" : "Stereo · L Channel")
+                            + juce::String::fromUTF8 (" · ") + juce::String (playbackSpeed)
+                            + juce::String::fromUTF8 ("×")
                           : juce::String ("WAVEFORM"),
                     information.removeFromRight (timeWidth), juce::Justification::centredRight);
 
@@ -358,7 +365,7 @@ public:
 
     void mouseDown (const juce::MouseEvent& event) override
     {
-        if (loaded && ! loading && duration > 0.0 && getPlotBounds().contains (event.position))
+        if (loaded && ! loading && ! choosingFile && duration > 0.0 && getPlotBounds().contains (event.position))
         {
             dragging = true;
             seek (event.position.x);
@@ -400,7 +407,8 @@ private:
     juce::File displayedFile;
     uint64_t displayedRevision = 0;
     static constexpr int timeWidth = 260;
-    bool loaded = false, loading = false, dragging = false, thumbnailAvailable = false;
+    bool loaded = false, loading = false, choosingFile = false, dragging = false, thumbnailAvailable = false;
+    int playbackSpeed = 1;
     double position = 0.0, duration = 0.0, sampleRate = 0.0;
 };
 
@@ -420,6 +428,7 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
     titleLabel.setText ("Waveform Player", juce::dontSendNotification);
     titleLabel.setFont (interfaceFont (interfaceTypeface, 25.0f));
     subtitleLabel.setFont (interfaceFont (interfaceTypeface, 12.0f));
+    subtitleLabel.setText ("Standalone audio playback", juce::dontSendNotification);
     subtitleLabel.setJustificationType (juce::Justification::centredRight);
     volumeValueLabel.setFont (interfaceFont (interfaceTypeface, 14.0f));
     volumeValueLabel.setJustificationType (juce::Justification::centredRight);
@@ -467,6 +476,9 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
     muteButton.onClick = [this] { audioProcessor.setMuted (muteButton.getToggleState()); updateFromProcessor(); };
     minimumVolumeButton.onClick = [this]
     {
+        const auto snapshot = audioProcessor.getPlaybackSnapshot();
+        if (! snapshot.loaded || snapshot.loading || snapshot.choosingFile || audioProcessor.isMuted())
+            return;
         audioProcessor.setGainDecibels (static_cast<float> (volumeSlider.getMinimum()));
         updateFromProcessor();
     };
@@ -543,14 +555,22 @@ void WaveformPlayerAudioProcessorEditor::resized()
     bounds.removeFromBottom (gap);
 
     volumePanelBounds = bounds.removeFromBottom (52);
-    auto volumeBounds = volumePanelBounds.reduced (14, 8);
-    minimumVolumeButton.setBounds (volumeBounds.removeFromLeft (16).withSizeKeepingCentre (32, 36));
-    volumeBounds.removeFromLeft (8);
-    volumeValueLabel.setBounds (volumeBounds.removeFromRight (96));
-    volumeBounds.removeFromRight (8);
-    muteButton.setBounds (volumeBounds.removeFromRight (32));
-    volumeBounds.removeFromRight (8);
-    volumeSlider.setBounds (volumeBounds);
+    const auto volumeBounds = volumePanelBounds.reduced (14, 8);
+    const auto alignedVolumeButtonBounds = [&volumeBounds] (const juce::TextButton& target)
+    {
+        // Match width parity so integer bounds retain the target's exact centre.
+        const auto width = 32 + target.getWidth() % 2;
+        return juce::Rectangle<int> { target.getX() + (target.getWidth() - width) / 2,
+                                      volumeBounds.getY(), width, volumeBounds.getHeight() };
+    };
+    minimumVolumeButton.setBounds (alignedVolumeButtonBounds (openButton));
+    muteButton.setBounds (alignedVolumeButtonBounds (loopButton));
+    const auto sliderLeft = minimumVolumeButton.getRight() + 8;
+    volumeSlider.setBounds (sliderLeft, volumeBounds.getY(), muteButton.getX() - 8 - sliderLeft,
+                            volumeBounds.getHeight());
+    const auto valueLeft = muteButton.getRight() + 8;
+    volumeValueLabel.setBounds (valueLeft, volumeBounds.getY(), volumeBounds.getRight() - valueLeft,
+                                volumeBounds.getHeight());
     bounds.removeFromBottom (gap);
 
     waveform->setBounds (bounds);
@@ -561,9 +581,11 @@ void WaveformPlayerAudioProcessorEditor::timerCallback() { updateFromProcessor()
 void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
 {
     const auto snapshot = audioProcessor.getPlaybackSnapshot();
-    const auto available = snapshot.loaded && ! snapshot.loading;
+    const auto available = snapshot.loaded && ! snapshot.loading && ! snapshot.choosingFile;
     const auto muted = audioProcessor.isMuted();
-    openButton.setEnabled (! snapshot.loading);
+    openButton.setToggleState (snapshot.choosingFile, juce::dontSendNotification);
+    openButton.setEnabled (! snapshot.loading && ! snapshot.choosingFile);
+    speedButton.setEnabled (! snapshot.choosingFile);
     rewindButton.setEnabled (available && snapshot.positionSeconds > 0.0);
     playButton.setEnabled (available && ! snapshot.playing);
     pauseButton.setEnabled (available && snapshot.playing);
@@ -572,7 +594,7 @@ void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
     loopButton.setEnabled (available);
     volumeSlider.setEnabled (available && ! muted);
     muteButton.setEnabled (available);
-    minimumVolumeButton.setEnabled (available);
+    minimumVolumeButton.setEnabled (available && ! muted);
 
     const auto speed = snapshot.playbackSpeed;
     const auto speedText = juce::String (speed) + "x";
@@ -581,9 +603,6 @@ void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
     speedButton.setName ("Playback speed: " + speedText);
     speedButton.setTooltip ("Playback speed: " + speedText + ". Click to cycle 1x, 2x, 4x, 8x.");
     speedButton.setDescription (speedButton.getTooltip());
-    subtitleLabel.setText (juce::String::fromUTF8 ("Standalone audio playback  ·  ") + juce::String (speed)
-                           + juce::String::fromUTF8 ("×"), juce::dontSendNotification);
-
     const auto looping = audioProcessor.isLooping();
     loopButton.setToggleState (looping, juce::dontSendNotification);
     loopButton.setButtonText (looping ? "Loop On" : "Loop Off");

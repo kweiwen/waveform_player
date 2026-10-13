@@ -129,6 +129,7 @@ public:
         addScreenshot ("WaveformPlayer-empty.png", 0, 0);
         addLoad (stereoFile);
         addAction ("WAV metadata and transport", [this] { testTransport(); });
+        addFileChooserTests();
         addScreenshot ("WaveformPlayer-ui.png", 0, 0, true);
         addScreenshot ("WaveformPlayer-fixed-size.png", 700, 400);
         addAction ("host rates and channel layouts", [this] { testRatesAndLayouts(); });
@@ -326,7 +327,7 @@ private:
     std::unique_ptr<Processor> processor, restored;
     std::unique_ptr<juce::AudioProcessorEditor> editor;
     juce::MemoryBlock savedState;
-    Processor::PlaybackSnapshot beforeInvalid;
+    Processor::PlaybackSnapshot beforeInvalid, beforeChooser;
     juce::File fixtureDirectory, stereoFile, monoFile, shortFile, flacFile, mp3File, floatFile, invalidFile;
     int checks = 0, failures = 0, callbacks = 0;
     double startedAt = 0.0, stageStartedAt = 0.0, screenshotReadyAt = 0.0;
@@ -459,6 +460,152 @@ private:
         });
     }
 
+    juce::TextButton* openButton() const
+    {
+        return editor != nullptr ? dynamic_cast<juce::TextButton*> (editor->findChildWithID ("open")) : nullptr;
+    }
+
+    static juce::FileBrowserComponent* findFileBrowser (juce::Component& parent)
+    {
+        if (auto* browser = dynamic_cast<juce::FileBrowserComponent*> (&parent)) return browser;
+        for (int child = 0; child < parent.getNumChildComponents(); ++child)
+            if (auto* browser = findFileBrowser (*parent.getChildComponent (child))) return browser;
+        return nullptr;
+    }
+
+    void dismissChooser (const juce::File& selection = {})
+    {
+        auto* dialog = juce::ModalComponentManager::getInstance()->getModalComponent (0);
+        expect (dynamic_cast<juce::FileChooserDialogBox*> (dialog) != nullptr,
+                "non-native chooser exposes its modal dialog");
+        if (dialog == nullptr) return;
+        if (selection != juce::File())
+        {
+            auto* browser = findFileBrowser (*dialog);
+            expect (browser != nullptr, "non-native chooser exposes its file browser");
+            if (browser == nullptr) { dialog->exitModalState (0); return; }
+            browser->setRoot (selection.getParentDirectory());
+            browser->setFileName (selection.getFileName());
+            expect (browser->currentFileIsValid() && browser->getSelectedFile (0) == selection,
+                    "chooser selects the requested fixture");
+        }
+        // This invokes JUCE's real asynchronous completion path, including getResult().
+        dialog->exitModalState (selection == juce::File() ? 0 : 1);
+    }
+
+    void addFileChooserTests()
+    {
+        addAction ("open non-native file chooser", [this]
+        {
+            editor.reset (processor->createEditor());
+            auto* button = openButton();
+            expect (button != nullptr && ! button->getToggleState() && button->isEnabled(),
+                    "Folder starts closed and enabled");
+            configure (*processor, sourceRate, 2);
+            processor->seekToSeconds (2.0);
+            processor->play();
+            render (*processor, 64);
+            beforeChooser = processor->getPlaybackSnapshot();
+            processor->chooseAudioFile (false);
+            const auto snapshot = processor->getPlaybackSnapshot();
+            expect (snapshot.choosingFile && ! snapshot.loading,
+                    "opening the chooser is distinct from decoding audio");
+            expect (snapshot.file == beforeChooser.file && snapshot.fileRevision == beforeChooser.fileRevision
+                    && snapshot.playing && near (snapshot.positionSeconds, beforeChooser.positionSeconds),
+                    "opening the chooser preserves the current audio and transport");
+            auto* modals = juce::ModalComponentManager::getInstance();
+            auto* firstDialog = modals->getModalComponent (0);
+            expect (firstDialog != nullptr && modals->getNumModalComponents() == 1, "one chooser dialog opens");
+            processor->chooseAudioFile (false);
+            expect (modals->getNumModalComponents() == 1 && modals->getModalComponent (0) == firstDialog,
+                    "duplicate chooser requests keep the original dialog");
+        });
+        addWait ("Folder open state refresh", [this]
+        {
+            auto* button = openButton();
+            return button != nullptr && button->getToggleState() && ! button->isEnabled();
+        });
+        addAction ("cancel chooser during playback", [this]
+        {
+            for (const auto& id : { juce::String ("rewind"), juce::String ("play"), juce::String ("pause"),
+                                   juce::String ("stop"), juce::String ("forward"), juce::String ("loop"),
+                                   "speed" + juce::String (processor->getPlaybackSpeed()), juce::String ("mute"),
+                                   juce::String ("volume-off"), juce::String ("volume") })
+            {
+                auto* control = editor->findChildWithID (id);
+                expect (control != nullptr && ! control->isEnabled(), id + " is disabled while choosing a file");
+            }
+            expect (! silent (render (*processor, 128)), "old audio stays audible while the chooser is open");
+            expect (near (processor->getPlaybackSnapshot().positionSeconds,
+                          beforeChooser.positionSeconds + 128.0 / sourceRate),
+                    "playback continues advancing while choosing a file");
+            beforeChooser = processor->getPlaybackSnapshot();
+            dismissChooser();
+        });
+        addWait ("cancelled chooser closes Folder", [this]
+        {
+            auto* button = openButton();
+            return ! processor->getPlaybackSnapshot().choosingFile && button != nullptr
+                   && ! button->getToggleState() && button->isEnabled();
+        });
+        addAction ("cancel preserves current playback", [this]
+        {
+            const auto snapshot = processor->getPlaybackSnapshot();
+            expect (snapshot.loaded && ! snapshot.loading && snapshot.file == beforeChooser.file
+                    && snapshot.fileRevision == beforeChooser.fileRevision && snapshot.error == beforeChooser.error,
+                    "chooser cancellation preserves the loaded file without a load request");
+            expect (snapshot.playing == beforeChooser.playing && near (snapshot.positionSeconds, beforeChooser.positionSeconds),
+                    "chooser cancellation preserves playback state and position");
+            processor->chooseAudioFile (false);
+        });
+        addWait ("Folder reopens for valid selection", [this]
+        { return openButton() != nullptr && openButton()->getToggleState(); });
+        addAction ("accept valid chooser selection", [this] { dismissChooser (stereoFile); });
+        addWait ("valid chooser selection completes", [this]
+        {
+            const auto snapshot = processor->getPlaybackSnapshot();
+            auto* button = openButton();
+            return ! snapshot.choosingFile && ! snapshot.loading
+                   && snapshot.fileRevision != beforeChooser.fileRevision && button != nullptr
+                   && ! button->getToggleState() && button->isEnabled();
+        });
+        addAction ("valid selection resets playback", [this]
+        {
+            const auto snapshot = processor->getPlaybackSnapshot();
+            expect (snapshot.loaded && snapshot.file == stereoFile && snapshot.error.isEmpty(),
+                    "chooser selection loads the chosen audio through the real callback");
+            expect (! snapshot.playing && near (snapshot.positionSeconds, 0.0),
+                    "successful chooser selection stops and resets playback");
+            processor->seekToSeconds (3.0);
+            processor->play();
+            render (*processor, 64);
+            beforeChooser = processor->getPlaybackSnapshot();
+            processor->chooseAudioFile (false);
+        });
+        addWait ("Folder reopens for invalid selection", [this]
+        { return openButton() != nullptr && openButton()->getToggleState(); });
+        addAction ("accept invalid chooser selection", [this] { dismissChooser (invalidFile); });
+        addWait ("invalid chooser selection completes", [this]
+        {
+            const auto snapshot = processor->getPlaybackSnapshot();
+            auto* button = openButton();
+            return ! snapshot.choosingFile && ! snapshot.loading && snapshot.error.isNotEmpty()
+                   && button != nullptr && ! button->getToggleState() && button->isEnabled();
+        });
+        addAction ("invalid chooser selection preserves playback", [this]
+        {
+            const auto snapshot = processor->getPlaybackSnapshot();
+            expect (snapshot.loaded && snapshot.file == beforeChooser.file
+                    && snapshot.fileRevision == beforeChooser.fileRevision
+                    && near (snapshot.durationSeconds, beforeChooser.durationSeconds),
+                    "invalid chooser selection preserves the previous file and duration");
+            expect (snapshot.playing == beforeChooser.playing && near (snapshot.positionSeconds, beforeChooser.positionSeconds),
+                    "invalid chooser selection preserves playback state and position");
+            editor.reset();
+        });
+        addLoad (stereoFile);
+    }
+
     void captureEditor (const juce::String& name)
     {
         const auto directory = juce::SystemStats::getEnvironmentVariable ("WAVEFORM_PLAYER_TEST_RESULTS", {});
@@ -502,27 +649,31 @@ private:
     {
         auto* button = minimumVolumeButton();
         auto* slider = volumeSlider();
-        expect (button != nullptr && button->isEnabled() && button->onClick,
-                "minimum-volume icon remains available during loaded playback, including mute");
+        const auto mutedBefore = processor->isMuted();
+        expect (button != nullptr && button->isEnabled() == ! mutedBefore && button->onClick,
+                "minimum-volume icon is available only during unmuted loaded playback");
         if (button == nullptr || slider == nullptr || ! button->onClick) return;
 
         const auto before = processor->getPlaybackSnapshot();
         const auto gainBefore = processor->getGainDecibels();
-        const auto mutedBefore = processor->isMuted();
         button->onClick();
         const auto after = processor->getPlaybackSnapshot();
-        expect (near (processor->getGainDecibels(), -60.0, 1.0e-4),
-                "minimum-volume icon sets the output gain to -60 dB");
+        const auto expectedGain = mutedBefore ? gainBefore : -60.0f;
+        expect (near (processor->getGainDecibels(), expectedGain, 1.0e-4),
+                mutedBefore ? "muted minimum-volume callback preserves the output gain"
+                            : "minimum-volume icon sets the output gain to -60 dB");
         auto* parameter = processor->getParameterState().getRawParameterValue ("gainDb");
-        expect (parameter != nullptr && near (parameter->load (std::memory_order_relaxed), -60.0, 1.0e-4),
-                "minimum-volume icon updates the host gain parameter");
-        expect (near (slider->getMinimum(), -60.0) && near (slider->getValue(), -60.0),
-                "minimum-volume icon synchronises the slider with its minimum");
-        bool minimumGainIsDisplayed = false;
+        expect (parameter != nullptr && near (parameter->load (std::memory_order_relaxed), expectedGain, 1.0e-4),
+                "minimum-volume callback respects mute in the host gain parameter");
+        // The slider snaps to 0.1 dB while the host parameter's normalisation
+        // round trip can differ by a few float ulps.
+        expect (near (slider->getMinimum(), -60.0) && near (slider->getValue(), expectedGain, 1.0e-4),
+                "minimum-volume callback keeps the slider synchronised with the permitted gain");
+        bool expectedGainIsDisplayed = false;
         for (int child = 0; child < editor->getNumChildComponents(); ++child)
             if (auto* label = dynamic_cast<juce::Label*> (editor->getChildComponent (child)))
-                minimumGainIsDisplayed |= label->getText() == "-60.0 dB";
-        expect (minimumGainIsDisplayed, "minimum-volume icon refreshes the visible dB reading");
+                expectedGainIsDisplayed |= label->getText() == juce::String (expectedGain, 1) + " dB";
+        expect (expectedGainIsDisplayed, "minimum-volume callback preserves the correct visible dB reading");
         expect (processor->isMuted() == mutedBefore && muteButton() != nullptr
                 && muteButton()->getToggleState() == mutedBefore,
                 "minimum-volume icon preserves the mute state");
@@ -563,15 +714,15 @@ private:
                 && minimumButton->isEnabled() == (original.loaded && ! original.loading),
                 "minimum-volume icon is enabled only with loaded audio ready for playback");
         expect (minimumButton != nullptr && minimumButton->getButtonText().isEmpty()
-                && minimumButton->getWidth() == 32 && minimumButton->getHeight() == 36,
-                "minimum-volume icon is textless and has a 32 x 36 pixel click target");
+                && minimumButton->getWidth() == 33 && minimumButton->getHeight() == 36,
+                "minimum-volume icon is textless and has a 33 x 36 pixel click target");
         auto* minimumHandler = minimumButton != nullptr ? minimumButton->getAccessibilityHandler() : nullptr;
         expect (minimumHandler != nullptr && minimumHandler->getTitle() == "Set volume to minimum",
                 "screen reader identifies the minimum-volume action");
         expect (button->getButtonText().isEmpty(), "mute icon has no visible Mute or Muted label");
         expect (button->getClickingTogglesState(), "volume icon toggles its state when clicked");
-        expect (button->getWidth() == 32 && button->getHeight() == 36,
-                "mute icon keeps a 32 x 36 pixel click target");
+        expect (button->getWidth() == 33 && button->getHeight() == 36,
+                "mute icon keeps a 33 x 36 pixel click target");
         expect (button->isEnabled() == (original.loaded && ! original.loading),
                 "mute icon is enabled only with loaded audio ready for playback");
         expect (button->getName() == "Mute output" && button->getTooltip().containsIgnoreCase ("mute"),
@@ -583,6 +734,24 @@ private:
         processor->play();
         expect (! silent (render (*processor, 512)), "loaded audio is audible before clicking the mute icon");
         testMinimumVolumeButton();
+        const auto beforeHostMute = processor->getPlaybackSnapshot();
+        const auto gainBeforeStaleClick = processor->getGainDecibels();
+        auto* muteParameter = processor->getParameterState().getParameter ("mute");
+        expect (minimumButton != nullptr && minimumButton->isEnabled() && muteParameter != nullptr,
+                "minimum-volume icon is enabled before host mute arrives");
+        if (minimumButton != nullptr && minimumButton->onClick && muteParameter != nullptr)
+        {
+            // No message-loop turn occurs between the host update and this stale UI callback.
+            muteParameter->setValueNotifyingHost (1.0f);
+            minimumButton->onClick();
+            const auto afterStaleClick = processor->getPlaybackSnapshot();
+            expect (processor->isMuted() && near (processor->getGainDecibels(), gainBeforeStaleClick, 1.0e-4),
+                    "stale minimum-volume callback respects host mute before UI refresh");
+            expect (afterStaleClick.playing == beforeHostMute.playing
+                    && near (afterStaleClick.positionSeconds, beforeHostMute.positionSeconds),
+                    "stale minimum-volume callback preserves playback and position");
+            muteParameter->setValueNotifyingHost (0.0f);
+        }
         const auto beforeMute = processor->getPlaybackSnapshot();
         // Calling onClick directly skips JUCE's mouse-handler toggle, so mirror
         // that state change before exercising the actual editor callback.
@@ -594,6 +763,7 @@ private:
                 "muted volume icon stays textless and exposes the unmute action");
         expectMuteAccessibility (true);
         expect (slider != nullptr && ! slider->isEnabled(), "clicking mute disables volume slider interaction");
+        expect (minimumButton != nullptr && ! minimumButton->isEnabled(), "clicking mute disables minimum-volume interaction");
         expect (near (processor->getGainDecibels(), -6.0, 1.0e-4), "volume icon mute preserves the selected gain");
         expect (afterMute.playing == beforeMute.playing && near (afterMute.positionSeconds, beforeMute.positionSeconds),
                 "volume icon mute preserves playback and position");
@@ -612,6 +782,7 @@ private:
         expectMuteAccessibility (false);
         expect (slider != nullptr && slider->isEnabled() && near (slider->getValue(), -6.0, 1.0e-4),
                 "clicking unmute restores volume slider interaction and the selected gain");
+        expect (minimumButton != nullptr && minimumButton->isEnabled(), "clicking unmute restores minimum-volume interaction");
         expect (near (processor->getGainDecibels(), -6.0, 1.0e-4), "volume icon unmute preserves the selected gain");
         expect (afterUnmute.playing == beforeUnmute.playing
                 && near (afterUnmute.positionSeconds, beforeUnmute.positionSeconds),
@@ -707,6 +878,8 @@ private:
                 expectMuteAccessibility (true);
                 auto* slider = volumeSlider();
                 expect (slider != nullptr && ! slider->isEnabled(), "host mute automation disables volume slider interaction");
+                expect (minimumVolumeButton() != nullptr && ! minimumVolumeButton()->isEnabled(),
+                        "host mute automation disables minimum-volume interaction");
                 expect (slider != nullptr && near (slider->getValue(), gainBeforeHostMute, 1.0e-4)
                         && near (processor->getGainDecibels(), gainBeforeHostMute, 1.0e-4),
                         "host mute automation preserves the selected gain and slider reading");
@@ -725,6 +898,8 @@ private:
                 expectMuteAccessibility (false);
                 auto* slider = volumeSlider();
                 expect (slider != nullptr && slider->isEnabled(), "host unmute automation restores volume slider interaction");
+                expect (minimumVolumeButton() != nullptr && minimumVolumeButton()->isEnabled(),
+                        "host unmute automation restores minimum-volume interaction");
                 expect (slider != nullptr && near (slider->getValue(), gainBeforeHostMute, 1.0e-4)
                         && near (processor->getGainDecibels(), gainBeforeHostMute, 1.0e-4),
                         "host unmute automation preserves the selected gain and slider reading");
