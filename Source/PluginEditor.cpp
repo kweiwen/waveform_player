@@ -1,0 +1,561 @@
+#include "PluginEditor.h"
+#include "BinaryData.h"
+
+namespace
+{
+    const juce::Colour background { 0xff0d0d0d };
+    const juce::Colour panel { 0xff171717 };
+    const juce::Colour border { 0xff303030 };
+    const juce::Colour textPrimary { 0xfff0f0f0 };
+    const juce::Colour textSecondary { 0xff939393 };
+    const juce::Colour accent { 0xffd9d9d9 };
+    const juce::Colour errorColour { 0xffececec };
+
+    juce::Font interfaceFont (const juce::Typeface::Ptr& typeface, float height)
+    {
+        return juce::Font (typeface).withHeight (height);
+    }
+
+    std::unique_ptr<juce::Drawable> volumeIcon (const char* data, int size)
+    {
+        auto xml = juce::XmlDocument::parse (juce::String::fromUTF8 (data, size).replace ("currentColor", "#000000"));
+        auto drawable = xml != nullptr ? juce::Drawable::createFromSVG (*xml) : nullptr;
+        jassert (drawable != nullptr);
+        if (drawable != nullptr)
+            drawable->replaceColour (juce::Colours::black, textSecondary);
+        return drawable;
+    }
+
+    juce::String formatTime (double seconds)
+    {
+        const auto milliseconds = static_cast<juce::int64> (std::llround (juce::jmax (0.0, seconds) * 1000.0));
+        const auto hours = milliseconds / 3600000;
+        const auto minutes = (milliseconds / 60000) % 60;
+        const auto wholeSeconds = (milliseconds / 1000) % 60;
+        const auto fraction = milliseconds % 1000;
+        const auto twoDigits = [] (juce::int64 value) { return juce::String (value).paddedLeft ('0', 2); };
+        const auto time = twoDigits (minutes) + ":" + twoDigits (wholeSeconds)
+                        + "." + juce::String (fraction).paddedLeft ('0', 3);
+        return hours > 0 ? juce::String (hours) + ":" + time : time;
+    }
+
+    void drawPanel (juce::Graphics& g, juce::Rectangle<float> bounds)
+    {
+        g.setColour (panel);
+        g.fillRoundedRectangle (bounds, 10.0f);
+        g.setColour (border);
+        g.drawRoundedRectangle (bounds.reduced (0.5f), 10.0f, 1.0f);
+    }
+}
+
+class WaveformPlayerAudioProcessorEditor::PlayerLookAndFeel final : public juce::LookAndFeel_V4
+{
+public:
+    explicit PlayerLookAndFeel (juce::Typeface::Ptr typeface) : interfaceTypeface (std::move (typeface))
+    {
+        setColour (juce::TooltipWindow::backgroundColourId, panel);
+        setColour (juce::TooltipWindow::textColourId, textPrimary);
+        setColour (juce::TooltipWindow::outlineColourId, border);
+        setColour (juce::Slider::backgroundColourId, border);
+        setColour (juce::Slider::trackColourId, accent);
+        setColour (juce::Slider::thumbColourId, textPrimary);
+        loadIcon (0, "rewind", BinaryData::rewindbtn_svg, BinaryData::rewindbtn_svgSize);
+        loadIcon (1, "play", BinaryData::playbtn_svg, BinaryData::playbtn_svgSize);
+        loadIcon (2, "pause", BinaryData::pausebtn_svg, BinaryData::pausebtn_svgSize);
+        loadIcon (3, "stop", BinaryData::stopbtn_svg, BinaryData::stopbtn_svgSize);
+        loadIcon (4, "forward", BinaryData::fastforwardbtn_svg, BinaryData::fastforwardbtn_svgSize);
+        loadIcon (5, "loop", BinaryData::loop_svg, BinaryData::loop_svgSize);
+        loadIcon (6, "open", BinaryData::folder2open_svg, BinaryData::folder2open_svgSize);
+    }
+
+    juce::Typeface::Ptr getTypefaceForFont (const juce::Font&) override { return interfaceTypeface; }
+
+    void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&, bool, bool) override {}
+
+    void drawButtonText (juce::Graphics& g, juce::TextButton& button, bool highlighted, bool down) override
+    {
+        const auto highlightedOrActive = highlighted || button.getToggleState() || button.hasKeyboardFocus (true);
+        const auto opacity = button.isEnabled() ? highlightedOrActive ? 1.0f : 0.85f : 0.25f;
+        for (const auto& icon : icons)
+        {
+            if (icon.id == button.getComponentID() && icon.normal != nullptr)
+            {
+                auto* drawable = highlightedOrActive ? icon.active.get() : icon.normal.get();
+                const auto centreX = static_cast<float> (button.getWidth()) * 0.5f;
+                const auto centreY = static_cast<float> (button.getHeight()) * 0.5f + (down ? 1.0f : 0.0f);
+                const auto size = 16.0f;
+                drawable->drawWithin (g, { centreX - size * 0.5f, centreY - size * 0.5f, size, size },
+                                      juce::RectanglePlacement::centred, opacity);
+                if (button.getToggleState())
+                {
+                    g.setColour (textPrimary.withAlpha (opacity));
+                    g.fillEllipse (centreX - 1.5f, static_cast<float> (button.getHeight()) - 4.0f, 3.0f, 3.0f);
+                }
+                else if (button.hasKeyboardFocus (true))
+                {
+                    g.setColour (textSecondary);
+                    g.drawHorizontalLine (button.getHeight() - 3, centreX - 10.0f, centreX + 10.0f);
+                }
+                return;
+            }
+        }
+        g.setColour (textPrimary.withMultipliedAlpha (opacity));
+        g.setFont (interfaceFont (interfaceTypeface, 12.0f));
+        g.drawFittedText (button.getButtonText(), button.getLocalBounds().reduced (8, 0),
+                          juce::Justification::centred, 1);
+        if (button.getToggleState() || button.hasKeyboardFocus (true))
+        {
+            const auto centreX = static_cast<float> (button.getWidth()) * 0.5f;
+            g.setColour (textPrimary.withMultipliedAlpha (opacity));
+            g.drawHorizontalLine (button.getHeight() - 4, centreX - 10.0f, centreX + 10.0f);
+        }
+    }
+
+    juce::Rectangle<int> getTooltipBounds (const juce::String& text, juce::Point<int> screenPosition,
+                                           juce::Rectangle<int> parentArea) override
+    {
+        const auto layout = tooltipLayout (text);
+        const auto width = juce::roundToInt (std::ceil (layout.getWidth())) + 20;
+        const auto height = juce::roundToInt (std::ceil (layout.getHeight())) + 14;
+        return juce::Rectangle<int> (screenPosition.x > parentArea.getCentreX() ? screenPosition.x - width - 12
+                                                                             : screenPosition.x + 24,
+                                      screenPosition.y > parentArea.getCentreY() ? screenPosition.y - height - 6
+                                                                              : screenPosition.y + 6,
+                                      width, height).constrainedWithin (parentArea);
+    }
+
+    void drawTooltip (juce::Graphics& g, const juce::String& text, int width, int height) override
+    {
+        g.fillAll (panel);
+        g.setColour (border);
+        g.drawRect (0, 0, width, height);
+        tooltipLayout (text).draw (g, juce::Rectangle<float> (static_cast<float> (width),
+                                                             static_cast<float> (height)).reduced (10.0f, 7.0f));
+    }
+
+    void drawLinearSlider (juce::Graphics& g, int x, int y, int width, int height,
+                           float sliderPosition, float, float,
+                           const juce::Slider::SliderStyle, juce::Slider& slider) override
+    {
+        const auto centreY = static_cast<float> (y) + static_cast<float> (height) * 0.5f;
+        const auto opacity = slider.isEnabled() ? 1.0f : 0.35f;
+        g.setColour (border);
+        g.fillRoundedRectangle (static_cast<float> (x), centreY - 2.0f, static_cast<float> (width), 4.0f, 2.0f);
+        g.setColour (accent.withAlpha (opacity));
+        g.fillRoundedRectangle (static_cast<float> (x), centreY - 2.0f,
+                                juce::jmax (0.0f, sliderPosition - static_cast<float> (x)), 4.0f, 2.0f);
+        g.setColour (textPrimary.withAlpha (opacity));
+        g.fillEllipse (sliderPosition - 6.0f, centreY - 6.0f, 12.0f, 12.0f);
+        g.setColour (background);
+        g.fillEllipse (sliderPosition - 2.0f, centreY - 2.0f, 4.0f, 4.0f);
+    }
+
+private:
+    struct Icon
+    {
+        juce::String id;
+        std::unique_ptr<juce::Drawable> normal, active;
+    };
+
+    void loadIcon (size_t index, const juce::String& id, const char* data, int size)
+    {
+        auto xml = juce::XmlDocument::parse (juce::String::fromUTF8 (data, size).replace ("currentColor", "#000000"));
+        if (xml == nullptr)
+            return;
+        auto drawable = juce::Drawable::createFromSVG (*xml);
+        jassert (drawable != nullptr);
+        if (drawable == nullptr)
+            return;
+
+        auto& icon = icons[index];
+        icon.id = id;
+        icon.normal = drawable->createCopy();
+        icon.active = drawable->createCopy();
+        icon.normal->replaceColour (juce::Colours::black, id == "loop" ? textSecondary : textPrimary);
+        icon.active->replaceColour (juce::Colours::black, textPrimary);
+    }
+
+    juce::TextLayout tooltipLayout (const juce::String& text) const
+    {
+        juce::AttributedString attributed;
+        attributed.append (text, interfaceFont (interfaceTypeface, 13.0f), textPrimary);
+        juce::TextLayout layout;
+        layout.createLayoutWithBalancedLineLengths (attributed, 440.0f);
+        return layout;
+    }
+
+    juce::Typeface::Ptr interfaceTypeface;
+    std::array<Icon, 7> icons;
+};
+
+class WaveformPlayerAudioProcessorEditor::WaveformDisplay final : public juce::Component,
+                                                                 public juce::SettableTooltipClient,
+                                                                 private juce::ChangeListener
+{
+public:
+    explicit WaveformDisplay (juce::Typeface::Ptr typeface)
+        : interfaceTypeface (std::move (typeface)), thumbnail (512, formatManager, thumbnailCache)
+    {
+        formatManager.registerBasicFormats();
+        thumbnail.addChangeListener (this);
+        setTooltip ("Click or drag the waveform to seek. Playback stays playing or paused.");
+        setTitle ("Audio waveform");
+        setDescription ("Click or drag to change the playback position");
+        fileNameLabel.setFont (interfaceFont (interfaceTypeface, 14.0f));
+        fileNameLabel.setColour (juce::Label::textColourId, textPrimary);
+        fileStatusLabel.setFont (interfaceFont (interfaceTypeface, 11.5f));
+        fileStatusLabel.setColour (juce::Label::textColourId, textSecondary);
+        for (auto* label : { &fileNameLabel, &fileStatusLabel })
+        {
+            label->setBorderSize (juce::BorderSize<int> (0));
+            addAndMakeVisible (*label);
+        }
+    }
+
+    ~WaveformDisplay() override
+    {
+        thumbnail.removeChangeListener (this);
+        thumbnail.clear();
+    }
+
+    void update (const WaveformPlayerAudioProcessor::PlaybackSnapshot& snapshot)
+    {
+        if (snapshot.loaded && (snapshot.file != displayedFile || snapshot.fileRevision != displayedRevision))
+        {
+            dragging = false;
+            displayedFile = snapshot.file;
+            displayedRevision = snapshot.fileRevision;
+            thumbnail.clear();
+            thumbnailCache.clear();
+            // AudioThumbnail performs decoding and file reads on its background thread.
+            thumbnailAvailable = thumbnail.setSource (new juce::FileInputSource (displayedFile, true));
+        }
+
+        loaded = snapshot.loaded;
+        loading = snapshot.loading;
+        if (! loaded || loading)
+            dragging = false;
+        duration = snapshot.durationSeconds;
+        sampleRate = snapshot.fileSampleRate;
+        if (! dragging)
+            position = snapshot.positionSeconds;
+        fileNameLabel.setText (snapshot.loaded ? snapshot.fileName : "No audio file loaded", juce::dontSendNotification);
+        const auto filePath = snapshot.loaded ? snapshot.file.getFullPathName() : juce::String();
+        fileNameLabel.setTooltip (filePath);
+        fileNameLabel.setDescription (filePath);
+        const auto status = snapshot.error.isNotEmpty() ? snapshot.error
+                          : snapshot.status.isNotEmpty() ? snapshot.status : "Choose a WAV, MP3 or FLAC file";
+        fileStatusLabel.setText (status, juce::dontSendNotification);
+        fileStatusLabel.setTooltip (status);
+        fileStatusLabel.setDescription (status);
+        fileStatusLabel.setColour (juce::Label::textColourId, snapshot.error.isNotEmpty() ? errorColour : textSecondary);
+        setMouseCursor (loaded && ! loading ? juce::MouseCursor::LeftRightResizeCursor
+                                           : juce::MouseCursor::NormalCursor);
+        repaint();
+    }
+
+    void resized() override
+    {
+        auto heading = getLocalBounds().reduced (16, 6).removeFromTop (22);
+        heading.removeFromRight (timeWidth + 16);
+        fileNameLabel.setBounds (heading);
+        auto status = getLocalBounds().reduced (16, 0).withTrimmedTop (28).removeFromTop (18);
+        status.removeFromRight (timeWidth + 16);
+        fileStatusLabel.setBounds (status);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        drawPanel (g, getLocalBounds().toFloat());
+        auto heading = getLocalBounds().reduced (16, 6).removeFromTop (22);
+        g.setFont (interfaceFont (interfaceTypeface, 15.0f));
+        g.setColour (loaded ? textPrimary : textSecondary);
+        g.drawText (formatTime (position) + " / " + formatTime (duration),
+                    heading.removeFromRight (timeWidth), juce::Justification::centredRight);
+
+        const auto channelCount = juce::jmax (1, thumbnail.getNumChannels());
+        auto information = getLocalBounds().reduced (16, 0).withTrimmedTop (28).removeFromTop (18);
+        g.setFont (interfaceFont (interfaceTypeface, 11.0f));
+        g.setColour (textSecondary);
+        g.drawText (loaded ? juce::String (sampleRate / 1000.0, 1) + juce::String::fromUTF8 (" kHz · ")
+                            + juce::String::fromUTF8 (channelCount == 1 ? "Mono" : "Stereo · L Channel")
+                          : juce::String ("WAVEFORM"),
+                    information.removeFromRight (timeWidth), juce::Justification::centredRight);
+
+        const auto bounds = getPlotBounds();
+        g.setColour (panel);
+        g.fillRoundedRectangle (bounds, 5.0f);
+        g.setColour (border.withAlpha (0.65f));
+        for (int division = 1; division < 8; ++division)
+        {
+            const auto x = bounds.getX() + bounds.getWidth() * static_cast<float> (division) / 8.0f;
+            g.drawVerticalLine (juce::roundToInt (x), bounds.getY(), bounds.getBottom());
+        }
+
+        g.drawHorizontalLine (juce::roundToInt (bounds.getCentreY()), bounds.getX(), bounds.getRight());
+
+        if (loaded && duration > 0.0 && thumbnail.getNumChannels() > 0)
+        {
+            const auto x = bounds.getX() + static_cast<float> (juce::jlimit (0.0, 1.0, position / duration)) * bounds.getWidth();
+            g.setColour (accent.withAlpha (0.055f));
+            g.fillRect (bounds.withRight (x));
+            g.setColour (accent.withAlpha (loading ? 0.35f : 0.85f));
+            // Only channel 0 is visualised; stereo audio output is unchanged.
+            thumbnail.drawChannel (g, bounds.toNearestInt().reduced (0, 5), 0.0, duration, 0, 0.9f);
+
+            g.setColour (textPrimary.withAlpha (loading ? 0.35f : 0.95f));
+            g.drawLine (x, bounds.getY(), x, bounds.getBottom(), 1.5f);
+            juce::Path handle;
+            handle.startNewSubPath (x - 5.0f, bounds.getY());
+            handle.lineTo (x + 5.0f, bounds.getY());
+            handle.lineTo (x + 5.0f, bounds.getY() + 5.0f);
+            handle.lineTo (x, bounds.getY() + 10.0f);
+            handle.lineTo (x - 5.0f, bounds.getY() + 5.0f);
+            handle.closeSubPath();
+            g.fillPath (handle);
+        }
+        else
+        {
+            g.setColour (textSecondary);
+            g.setFont (interfaceFont (interfaceTypeface, 14.0f));
+            g.drawFittedText (juce::String::fromUTF8 (loading ? "Loading audio…"
+                              : loaded ? thumbnailAvailable ? "Building waveform…" : "Waveform unavailable"
+                                       : "Open an audio file to begin"),
+                              bounds.toNearestInt(), juce::Justification::centred, 1);
+        }
+
+        auto footer = getLocalBounds().reduced (16, 0).removeFromBottom (25);
+        g.setFont (interfaceFont (interfaceTypeface, 11.0f));
+        g.setColour (textSecondary);
+        g.drawText (juce::String::fromUTF8 (loaded ? "Click or drag to seek" : "WAV · MP3 · FLAC"), footer.removeFromLeft (220),
+                    juce::Justification::centredLeft);
+    }
+
+    void mouseDown (const juce::MouseEvent& event) override
+    {
+        if (loaded && ! loading && duration > 0.0 && getPlotBounds().contains (event.position))
+        {
+            dragging = true;
+            seek (event.position.x);
+        }
+    }
+
+    void mouseDrag (const juce::MouseEvent& event) override
+    {
+        if (dragging)
+            seek (event.position.x);
+    }
+
+    void mouseUp (const juce::MouseEvent&) override { dragging = false; }
+
+    std::function<void (double)> onSeek;
+
+private:
+    juce::Rectangle<float> getPlotBounds() const
+    {
+        return getLocalBounds().reduced (16, 0).withTrimmedTop (52).withTrimmedBottom (25).toFloat();
+    }
+
+    void seek (float x)
+    {
+        const auto bounds = getPlotBounds();
+        position = duration * juce::jlimit (0.0, 1.0, static_cast<double> ((x - bounds.getX()) / bounds.getWidth()));
+        if (onSeek)
+            onSeek (position);
+        repaint();
+    }
+
+    void changeListenerCallback (juce::ChangeBroadcaster*) override { repaint(); }
+
+    juce::Typeface::Ptr interfaceTypeface;
+    juce::Label fileNameLabel, fileStatusLabel;
+    juce::AudioFormatManager formatManager;
+    juce::AudioThumbnailCache thumbnailCache { 4 };
+    juce::AudioThumbnail thumbnail;
+    juce::File displayedFile;
+    uint64_t displayedRevision = 0;
+    static constexpr int timeWidth = 260;
+    bool loaded = false, loading = false, dragging = false, thumbnailAvailable = false;
+    double position = 0.0, duration = 0.0, sampleRate = 0.0;
+};
+
+WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (WaveformPlayerAudioProcessor& processor)
+    : AudioProcessorEditor (&processor), audioProcessor (processor),
+      interfaceTypeface (juce::Typeface::createSystemTypefaceFor (BinaryData::PlayBold_ttf,
+                                                                 BinaryData::PlayBold_ttfSize)),
+      playerLookAndFeel (std::make_unique<PlayerLookAndFeel> (interfaceTypeface)),
+      waveform (std::make_unique<WaveformDisplay> (interfaceTypeface)),
+      volumeOffIcon (volumeIcon (BinaryData::volumeoff_svg, BinaryData::volumeoff_svgSize)),
+      volumeUpIcon (volumeIcon (BinaryData::volumeup_svg, BinaryData::volumeup_svgSize))
+{
+    jassert (interfaceTypeface != nullptr);
+    setLookAndFeel (playerLookAndFeel.get());
+    tooltips.setLookAndFeel (playerLookAndFeel.get());
+    setOpaque (true);
+    setResizable (true, false);
+    setResizeLimits (700, 400, 1400, 900);
+
+    titleLabel.setText ("Waveform Player", juce::dontSendNotification);
+    titleLabel.setFont (interfaceFont (interfaceTypeface, 25.0f));
+    subtitleLabel.setText (juce::String::fromUTF8 ("Standalone audio playback  ·  1.0×"), juce::dontSendNotification);
+    subtitleLabel.setFont (interfaceFont (interfaceTypeface, 12.0f));
+    subtitleLabel.setJustificationType (juce::Justification::centredRight);
+    volumeValueLabel.setFont (interfaceFont (interfaceTypeface, 14.0f));
+    volumeValueLabel.setJustificationType (juce::Justification::centredRight);
+    for (auto* label : { &titleLabel, &subtitleLabel, &volumeValueLabel })
+    {
+        label->setColour (juce::Label::textColourId,
+                          label == &subtitleLabel ? textSecondary : textPrimary);
+        label->setBorderSize (juce::BorderSize<int> (0));
+        addAndMakeVisible (*label);
+    }
+
+    configureButton (openButton, "Open", "Load a WAV, MP3 or FLAC audio file");
+    openButton.setComponentID ("open");
+    configureButton (rewindButton, juce::String::fromUTF8 ("RW  −5 s"), "Seek backward by five seconds");
+    rewindButton.setComponentID ("rewind");
+    configureButton (playButton, "Play", "Play from the current position");
+    playButton.setComponentID ("play");
+    configureButton (pauseButton, "Pause", "Pause and keep the current position");
+    pauseButton.setComponentID ("pause");
+    configureButton (stopButton, "Stop", "Stop and return to the start");
+    stopButton.setComponentID ("stop");
+    configureButton (forwardButton, "FF  +5 s", "Seek forward by five seconds");
+    forwardButton.setComponentID ("forward");
+    configureButton (loopButton, "Loop Off", "Repeat the whole audio file");
+    loopButton.setComponentID ("loop");
+    configureButton (muteButton, "Mute", "Mute the output without changing the volume setting");
+    loopButton.setClickingTogglesState (true);
+    muteButton.setClickingTogglesState (true);
+
+    openButton.onClick = [this] { audioProcessor.chooseAudioFile(); updateFromProcessor(); };
+    rewindButton.onClick = [this] { audioProcessor.skipSeconds (-5.0); updateFromProcessor(); };
+    playButton.onClick = [this] { audioProcessor.play(); updateFromProcessor(); };
+    pauseButton.onClick = [this] { audioProcessor.pause(); updateFromProcessor(); };
+    stopButton.onClick = [this] { audioProcessor.stop(); updateFromProcessor(); };
+    forwardButton.onClick = [this] { audioProcessor.skipSeconds (5.0); updateFromProcessor(); };
+    loopButton.onClick = [this] { audioProcessor.setLooping (loopButton.getToggleState()); updateFromProcessor(); };
+    muteButton.onClick = [this] { audioProcessor.setMuted (muteButton.getToggleState()); updateFromProcessor(); };
+    waveform->onSeek = [this] (double seconds) { audioProcessor.seekToSeconds (seconds); };
+    addAndMakeVisible (*waveform);
+
+    volumeSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    volumeSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    volumeSlider.setRange (-60.0, 6.0, 0.1);
+    volumeSlider.setDoubleClickReturnValue (true, 0.0);
+    volumeSlider.setTooltip (juce::String::fromUTF8 ("Output gain: −60 dB to +6 dB. Double-click to reset to 0 dB."));
+    volumeSlider.setTitle ("Output volume in decibels");
+    volumeSlider.onValueChange = [this]
+    {
+        audioProcessor.setGainDecibels (static_cast<float> (volumeSlider.getValue()));
+        updateFromProcessor();
+    };
+    addAndMakeVisible (volumeSlider);
+
+    setSize (820, 480);
+    updateFromProcessor();
+    startTimerHz (30);
+}
+
+WaveformPlayerAudioProcessorEditor::~WaveformPlayerAudioProcessorEditor()
+{
+    stopTimer();
+    tooltips.setLookAndFeel (nullptr);
+    setLookAndFeel (nullptr);
+}
+
+void WaveformPlayerAudioProcessorEditor::configureButton (juce::TextButton& button,
+                                                         const juce::String& text,
+                                                         const juce::String& tooltip)
+{
+    button.setButtonText (text);
+    button.setName (text);
+    button.setDescription (tooltip);
+    button.setTooltip (tooltip);
+    button.setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    addAndMakeVisible (button);
+}
+
+void WaveformPlayerAudioProcessorEditor::paint (juce::Graphics& g)
+{
+    g.fillAll (background);
+    drawPanel (g, volumePanelBounds.toFloat());
+    if (volumeOffIcon != nullptr)
+        volumeOffIcon->drawWithin (g, volumeOffIconBounds.toFloat(), juce::RectanglePlacement::centred, 1.0f);
+    if (volumeUpIcon != nullptr)
+        volumeUpIcon->drawWithin (g, volumeUpIconBounds.toFloat(), juce::RectanglePlacement::centred, 1.0f);
+    g.setColour (textSecondary);
+    g.setFont (interfaceFont (interfaceTypeface, 11.0f));
+    g.drawText ("v0.2", getWidth() - 67, 20, 43, 36, juce::Justification::centred);
+}
+
+void WaveformPlayerAudioProcessorEditor::resized()
+{
+    const auto gap = getHeight() < 440 ? 12 : 16;
+    auto bounds = getLocalBounds().reduced (24, 20);
+    auto heading = bounds.removeFromTop (36);
+    heading.removeFromRight (43);
+    heading.removeFromRight (16);
+    subtitleLabel.setBounds (heading.removeFromRight (270));
+    heading.removeFromRight (16);
+    titleLabel.setBounds (heading);
+    bounds.removeFromTop (gap);
+
+    auto controls = bounds.removeFromBottom (36);
+    const auto buttonWidth = (controls.getWidth() - 6 * 8) / 7;
+    for (auto* button : { &openButton, &rewindButton, &playButton, &pauseButton, &stopButton, &forwardButton, &loopButton })
+    {
+        button->setBounds (controls.removeFromLeft (buttonWidth));
+        controls.removeFromLeft (8);
+    }
+    bounds.removeFromBottom (gap);
+
+    volumePanelBounds = bounds.removeFromBottom (52);
+    auto volumeBounds = volumePanelBounds.reduced (14, 8);
+    volumeOffIconBounds = volumeBounds.removeFromLeft (16).withSizeKeepingCentre (16, 16);
+    volumeBounds.removeFromLeft (8);
+    muteButton.setBounds (volumeBounds.removeFromRight (76));
+    volumeBounds.removeFromRight (16);
+    volumeValueLabel.setBounds (volumeBounds.removeFromRight (96));
+    volumeBounds.removeFromRight (8);
+    volumeUpIconBounds = volumeBounds.removeFromRight (16).withSizeKeepingCentre (16, 16);
+    volumeBounds.removeFromRight (8);
+    volumeSlider.setBounds (volumeBounds);
+    bounds.removeFromBottom (gap);
+
+    waveform->setBounds (bounds);
+}
+
+void WaveformPlayerAudioProcessorEditor::timerCallback() { updateFromProcessor(); }
+
+void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
+{
+    const auto snapshot = audioProcessor.getPlaybackSnapshot();
+    const auto available = snapshot.loaded && ! snapshot.loading;
+    openButton.setEnabled (! snapshot.loading);
+    rewindButton.setEnabled (available && snapshot.positionSeconds > 0.0);
+    playButton.setEnabled (available && ! snapshot.playing);
+    pauseButton.setEnabled (available && snapshot.playing);
+    stopButton.setEnabled (available && (snapshot.playing || snapshot.positionSeconds > 0.0));
+    forwardButton.setEnabled (available && snapshot.positionSeconds < snapshot.durationSeconds);
+    loopButton.setEnabled (available);
+    volumeSlider.setEnabled (available);
+    muteButton.setEnabled (available);
+
+    const auto looping = audioProcessor.isLooping();
+    loopButton.setToggleState (looping, juce::dontSendNotification);
+    loopButton.setButtonText (looping ? "Loop On" : "Loop Off");
+    loopButton.setName (loopButton.getButtonText());
+    loopButton.setTooltip (looping ? "Loop On: repeat the whole audio file" : "Loop Off: stop and return to the start at the end");
+    loopButton.setDescription (loopButton.getTooltip());
+    const auto muted = audioProcessor.isMuted();
+    muteButton.setToggleState (muted, juce::dontSendNotification);
+    muteButton.setButtonText (muted ? "Muted" : "Mute");
+    muteButton.setName (muteButton.getButtonText());
+    const auto gain = audioProcessor.getGainDecibels();
+    volumeSlider.setValue (gain, juce::dontSendNotification);
+    volumeValueLabel.setText ((gain > 0.0f ? "+" : "") + juce::String (gain, 1) + " dB",
+                              juce::dontSendNotification);
+    volumeValueLabel.setColour (juce::Label::textColourId, muted ? textSecondary : textPrimary);
+    waveform->update (snapshot);
+}
