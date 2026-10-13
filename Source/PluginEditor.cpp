@@ -12,6 +12,7 @@ namespace
     const juce::Colour errorColour { 0xffececec };
     constexpr int editorWidth = 600;
     constexpr int editorHeight = 360;
+    constexpr int horizontalMargin = 12;
     constexpr int headingHeight = 28;
     constexpr int svgCanvasSize = 16;
 
@@ -31,14 +32,6 @@ namespace
         }
         auto drawable = xml != nullptr ? juce::Drawable::createFromSVG (*xml) : nullptr;
         jassert (drawable != nullptr);
-        return drawable;
-    }
-
-    std::unique_ptr<juce::Drawable> volumeIcon (const char* data, int size)
-    {
-        auto drawable = svgIcon (data, size);
-        if (drawable != nullptr)
-            drawable->replaceColour (juce::Colours::black, textSecondary);
         return drawable;
     }
 
@@ -96,6 +89,9 @@ public:
         loadIcon (8, "speed2", BinaryData::_2circle_svg, BinaryData::_2circle_svgSize);
         loadIcon (9, "speed4", BinaryData::_4circle_svg, BinaryData::_4circle_svgSize);
         loadIcon (10, "speed8", BinaryData::_8circle_svg, BinaryData::_8circle_svgSize);
+        loadIcon (11, "volume-up", BinaryData::volumeup_svg, BinaryData::volumeup_svgSize);
+        loadIcon (12, "volume-mute", BinaryData::volumemute_svg, BinaryData::volumemute_svgSize);
+        loadIcon (13, "volume-off", BinaryData::volumeoff_svg, BinaryData::volumeoff_svgSize);
     }
 
     juce::Typeface::Ptr getTypefaceForFont (const juce::Font&) override { return interfaceTypeface; }
@@ -106,16 +102,19 @@ public:
     {
         const auto highlightedOrActive = highlighted || button.getToggleState() || button.hasKeyboardFocus (true);
         const auto opacity = button.isEnabled() ? highlightedOrActive ? 1.0f : 0.85f : 0.25f;
+        const auto isMuteButton = button.getComponentID() == "mute";
+        const auto iconId = isMuteButton ? juce::String (button.getToggleState() ? "volume-mute" : "volume-up")
+                                         : button.getComponentID();
         for (const auto& icon : icons)
         {
-            if (icon.id == button.getComponentID() && icon.normal != nullptr)
+            if (icon.id == iconId && icon.normal != nullptr)
             {
                 auto* drawable = highlightedOrActive ? icon.active.get() : icon.normal.get();
                 const auto centreX = static_cast<float> (button.getWidth()) * 0.5f;
                 const auto centreY = static_cast<float> (button.getHeight()) * 0.5f + (down ? 1.0f : 0.0f);
                 const auto size = static_cast<float> (svgCanvasSize);
                 drawSvgIcon (g, *drawable, { centreX - size * 0.5f, centreY - size * 0.5f, size, size }, opacity);
-                if (button.getToggleState())
+                if (button.getToggleState() && ! isMuteButton)
                 {
                     g.setColour (textPrimary.withAlpha (opacity));
                     g.fillEllipse (centreX - 1.5f, static_cast<float> (button.getHeight()) - 4.0f, 3.0f, 3.0f);
@@ -196,7 +195,8 @@ private:
         icon.id = id;
         icon.normal = drawable->createCopy();
         icon.active = drawable->createCopy();
-        icon.normal->replaceColour (juce::Colours::black, id == "loop" ? textSecondary : textPrimary);
+        icon.normal->replaceColour (juce::Colours::black, id == "loop" || id.startsWith ("volume-")
+                                                          ? textSecondary : textPrimary);
         icon.active->replaceColour (juce::Colours::black, textPrimary);
     }
 
@@ -210,7 +210,7 @@ private:
     }
 
     juce::Typeface::Ptr interfaceTypeface;
-    std::array<Icon, 11> icons;
+    std::array<Icon, 14> icons;
 };
 
 class WaveformPlayerAudioProcessorEditor::WaveformDisplay final : public juce::Component,
@@ -409,9 +409,7 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
       interfaceTypeface (juce::Typeface::createSystemTypefaceFor (BinaryData::PlayBold_ttf,
                                                                  BinaryData::PlayBold_ttfSize)),
       playerLookAndFeel (std::make_unique<PlayerLookAndFeel> (interfaceTypeface)),
-      waveform (std::make_unique<WaveformDisplay> (interfaceTypeface)),
-      volumeOffIcon (volumeIcon (BinaryData::volumeoff_svg, BinaryData::volumeoff_svgSize)),
-      volumeUpIcon (volumeIcon (BinaryData::volumeup_svg, BinaryData::volumeup_svgSize))
+      waveform (std::make_unique<WaveformDisplay> (interfaceTypeface))
 {
     jassert (interfaceTypeface != nullptr);
     setLookAndFeel (playerLookAndFeel.get());
@@ -449,7 +447,12 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
     loopButton.setComponentID ("loop");
     configureButton (speedButton, "Speed 1x", "Click to cycle playback speed: 1x, 2x, 4x, 8x");
     speedButton.setComponentID ("speed1");
-    configureButton (muteButton, "Mute", "Mute the output without changing the volume setting");
+    configureButton (muteButton, {}, "Mute the output without changing the volume setting");
+    muteButton.setComponentID ("mute");
+    configureButton (minimumVolumeButton, {}, "Set the output volume to its minimum: -60 dB");
+    minimumVolumeButton.setComponentID ("volume-off");
+    minimumVolumeButton.setName ("Set volume to minimum");
+    minimumVolumeButton.setTitle (minimumVolumeButton.getName());
     loopButton.setClickingTogglesState (true);
     muteButton.setClickingTogglesState (true);
 
@@ -462,10 +465,16 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
     loopButton.onClick = [this] { audioProcessor.setLooping (loopButton.getToggleState()); updateFromProcessor(); };
     speedButton.onClick = [this] { audioProcessor.cyclePlaybackSpeed(); updateFromProcessor(); };
     muteButton.onClick = [this] { audioProcessor.setMuted (muteButton.getToggleState()); updateFromProcessor(); };
+    minimumVolumeButton.onClick = [this]
+    {
+        audioProcessor.setGainDecibels (static_cast<float> (volumeSlider.getMinimum()));
+        updateFromProcessor();
+    };
     waveform->onSeek = [this] (double seconds) { audioProcessor.seekToSeconds (seconds); };
     addAndMakeVisible (*waveform);
 
     volumeSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    volumeSlider.setComponentID ("volume");
     volumeSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
     volumeSlider.setRange (-60.0, 6.0, 0.1);
     volumeSlider.setDoubleClickReturnValue (true, 0.0);
@@ -507,19 +516,15 @@ void WaveformPlayerAudioProcessorEditor::paint (juce::Graphics& g)
 {
     g.fillAll (background);
     drawPanel (g, volumePanelBounds.toFloat());
-    if (volumeOffIcon != nullptr)
-        drawSvgIcon (g, *volumeOffIcon, volumeOffIconBounds.toFloat());
-    if (volumeUpIcon != nullptr)
-        drawSvgIcon (g, *volumeUpIcon, volumeUpIconBounds.toFloat());
     g.setColour (textSecondary);
     g.setFont (interfaceFont (interfaceTypeface, 11.0f));
-    g.drawText ("v0.2", getWidth() - 67, 20, 43, headingHeight, juce::Justification::centred);
+    g.drawText ("v0.2", getWidth() - horizontalMargin - 43, 20, 43, headingHeight, juce::Justification::centred);
 }
 
 void WaveformPlayerAudioProcessorEditor::resized()
 {
     const auto gap = getHeight() < 440 ? 12 : 16;
-    auto bounds = getLocalBounds().reduced (24, 20);
+    auto bounds = getLocalBounds().reduced (horizontalMargin, 20);
     auto heading = bounds.removeFromTop (headingHeight);
     heading.removeFromRight (43);
     heading.removeFromRight (16);
@@ -539,13 +544,11 @@ void WaveformPlayerAudioProcessorEditor::resized()
 
     volumePanelBounds = bounds.removeFromBottom (52);
     auto volumeBounds = volumePanelBounds.reduced (14, 8);
-    volumeOffIconBounds = volumeBounds.removeFromLeft (16).withSizeKeepingCentre (16, 16);
+    minimumVolumeButton.setBounds (volumeBounds.removeFromLeft (16).withSizeKeepingCentre (32, 36));
     volumeBounds.removeFromLeft (8);
-    muteButton.setBounds (volumeBounds.removeFromRight (76));
-    volumeBounds.removeFromRight (16);
     volumeValueLabel.setBounds (volumeBounds.removeFromRight (96));
     volumeBounds.removeFromRight (8);
-    volumeUpIconBounds = volumeBounds.removeFromRight (16).withSizeKeepingCentre (16, 16);
+    muteButton.setBounds (volumeBounds.removeFromRight (32));
     volumeBounds.removeFromRight (8);
     volumeSlider.setBounds (volumeBounds);
     bounds.removeFromBottom (gap);
@@ -559,6 +562,7 @@ void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
 {
     const auto snapshot = audioProcessor.getPlaybackSnapshot();
     const auto available = snapshot.loaded && ! snapshot.loading;
+    const auto muted = audioProcessor.isMuted();
     openButton.setEnabled (! snapshot.loading);
     rewindButton.setEnabled (available && snapshot.positionSeconds > 0.0);
     playButton.setEnabled (available && ! snapshot.playing);
@@ -566,8 +570,9 @@ void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
     stopButton.setEnabled (available && (snapshot.playing || snapshot.positionSeconds > 0.0));
     forwardButton.setEnabled (available && snapshot.positionSeconds < snapshot.durationSeconds);
     loopButton.setEnabled (available);
-    volumeSlider.setEnabled (available);
+    volumeSlider.setEnabled (available && ! muted);
     muteButton.setEnabled (available);
+    minimumVolumeButton.setEnabled (available);
 
     const auto speed = snapshot.playbackSpeed;
     const auto speedText = juce::String (speed) + "x";
@@ -585,10 +590,12 @@ void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
     loopButton.setName (loopButton.getButtonText());
     loopButton.setTooltip (looping ? "Loop On: repeat the whole audio file" : "Loop Off: stop and return to the start at the end");
     loopButton.setDescription (loopButton.getTooltip());
-    const auto muted = audioProcessor.isMuted();
     muteButton.setToggleState (muted, juce::dontSendNotification);
-    muteButton.setButtonText (muted ? "Muted" : "Mute");
-    muteButton.setName (muteButton.getButtonText());
+    muteButton.setName (muted ? "Unmute output" : "Mute output");
+    muteButton.setTitle (muteButton.getName());
+    muteButton.setTooltip (muted ? "Output muted. Click to unmute without changing the volume setting."
+                                : "Click to mute the output without changing the volume setting.");
+    muteButton.setDescription (muteButton.getTooltip());
     const auto gain = audioProcessor.getGainDecibels();
     volumeSlider.setValue (gain, juce::dontSendNotification);
     volumeValueLabel.setText ((gain > 0.0f ? "+" : "") + juce::String (gain, 1) + " dB",

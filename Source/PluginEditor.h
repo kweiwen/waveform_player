@@ -25,14 +25,13 @@ private:
     juce::Typeface::Ptr interfaceTypeface;
     std::unique_ptr<PlayerLookAndFeel> playerLookAndFeel;
     std::unique_ptr<WaveformDisplay> waveform;
-    std::unique_ptr<juce::Drawable> volumeOffIcon, volumeUpIcon;
     juce::TooltipWindow tooltips { this, 650 };
 
     juce::TextButton openButton, rewindButton, playButton, pauseButton, stopButton,
-                     forwardButton, loopButton, speedButton, muteButton;
+                     forwardButton, loopButton, speedButton, muteButton, minimumVolumeButton;
     juce::Slider volumeSlider;
     juce::Label titleLabel, subtitleLabel, volumeValueLabel;
-    juce::Rectangle<int> volumePanelBounds, volumeOffIconBounds, volumeUpIconBounds;
+    juce::Rectangle<int> volumePanelBounds;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaveformPlayerAudioProcessorEditor)
 };

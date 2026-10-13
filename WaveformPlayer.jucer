@@ -32,6 +32,7 @@
         <FILE id="WfVolOff" name="volume-off.svg" compile="0" resource="1"
               file="Resource/SVG/volume-off.svg"/>
         <FILE id="WfVolUp" name="volume-up.svg" compile="0" resource="1" file="Resource/SVG/volume-up.svg"/>
+        <FILE id="WfVolMute" name="volume-mute.svg" compile="0" resource="1" file="Resource/SVG/volume-mute.svg"/>
         <FILE id="WfSpeed1" name="1-circle.svg" compile="0" resource="1" file="Resource/SVG/1-circle.svg"/>
         <FILE id="WfSpeed2" name="2-circle.svg" compile="0" resource="1" file="Resource/SVG/2-circle.svg"/>
         <FILE id="WfSpeed4" name="4-circle.svg" compile="0" resource="1" file="Resource/SVG/4-circle.svg"/>

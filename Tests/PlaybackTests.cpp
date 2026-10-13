@@ -330,6 +330,7 @@ private:
     juce::File fixtureDirectory, stereoFile, monoFile, shortFile, flacFile, mp3File, floatFile, invalidFile;
     int checks = 0, failures = 0, callbacks = 0;
     double startedAt = 0.0, stageStartedAt = 0.0, screenshotReadyAt = 0.0;
+    float gainBeforeHostMute = 0.0f;
     bool finished = false;
     std::thread stressThread;
     std::atomic<bool> stressRunning { false };
@@ -479,6 +480,152 @@ private:
             "speed" + juce::String (processor->getPlaybackSpeed())));
     }
 
+    juce::TextButton* muteButton() const
+    {
+        if (editor == nullptr) return nullptr;
+        return dynamic_cast<juce::TextButton*> (editor->findChildWithID ("mute"));
+    }
+
+    juce::Slider* volumeSlider() const
+    {
+        if (editor == nullptr) return nullptr;
+        return dynamic_cast<juce::Slider*> (editor->findChildWithID ("volume"));
+    }
+
+    juce::TextButton* minimumVolumeButton() const
+    {
+        if (editor == nullptr) return nullptr;
+        return dynamic_cast<juce::TextButton*> (editor->findChildWithID ("volume-off"));
+    }
+
+    void testMinimumVolumeButton()
+    {
+        auto* button = minimumVolumeButton();
+        auto* slider = volumeSlider();
+        expect (button != nullptr && button->isEnabled() && button->onClick,
+                "minimum-volume icon remains available during loaded playback, including mute");
+        if (button == nullptr || slider == nullptr || ! button->onClick) return;
+
+        const auto before = processor->getPlaybackSnapshot();
+        const auto gainBefore = processor->getGainDecibels();
+        const auto mutedBefore = processor->isMuted();
+        button->onClick();
+        const auto after = processor->getPlaybackSnapshot();
+        expect (near (processor->getGainDecibels(), -60.0, 1.0e-4),
+                "minimum-volume icon sets the output gain to -60 dB");
+        auto* parameter = processor->getParameterState().getRawParameterValue ("gainDb");
+        expect (parameter != nullptr && near (parameter->load (std::memory_order_relaxed), -60.0, 1.0e-4),
+                "minimum-volume icon updates the host gain parameter");
+        expect (near (slider->getMinimum(), -60.0) && near (slider->getValue(), -60.0),
+                "minimum-volume icon synchronises the slider with its minimum");
+        bool minimumGainIsDisplayed = false;
+        for (int child = 0; child < editor->getNumChildComponents(); ++child)
+            if (auto* label = dynamic_cast<juce::Label*> (editor->getChildComponent (child)))
+                minimumGainIsDisplayed |= label->getText() == "-60.0 dB";
+        expect (minimumGainIsDisplayed, "minimum-volume icon refreshes the visible dB reading");
+        expect (processor->isMuted() == mutedBefore && muteButton() != nullptr
+                && muteButton()->getToggleState() == mutedBefore,
+                "minimum-volume icon preserves the mute state");
+        expect (after.playing == before.playing && near (after.positionSeconds, before.positionSeconds),
+                "minimum-volume icon preserves playback and position");
+        expect (slider->isEnabled() == ! mutedBefore, "minimum-volume icon preserves mute-dependent slider availability");
+        processor->setGainDecibels (gainBefore);
+    }
+
+    void expectMuteAccessibility (bool muted)
+    {
+        auto* button = muteButton();
+        auto* handler = button != nullptr ? button->getAccessibilityHandler() : nullptr;
+        expect (handler != nullptr, "volume icon exposes an accessibility handler");
+        if (handler == nullptr) return;
+
+        const auto title = handler->getTitle();
+        expect (title.isNotEmpty() && title == (muted ? "Unmute output" : "Mute output"),
+                "screen reader receives the current volume icon action");
+        const auto state = handler->getCurrentState();
+        expect (state.isCheckable() && state.isChecked() == muted,
+                "screen reader receives the current mute toggle state");
+    }
+
+    void testMuteButton()
+    {
+        auto* button = muteButton();
+        expect (button != nullptr, "volume icon exposes the mute control");
+        if (button == nullptr) return;
+
+        const auto original = processor->getPlaybackSnapshot();
+        const auto originalGain = processor->getGainDecibels();
+        auto* slider = volumeSlider();
+        auto* minimumButton = minimumVolumeButton();
+        expect (slider != nullptr && slider->isEnabled() == (original.loaded && ! original.loading),
+                "volume slider is available when unmuted audio is ready for playback");
+        expect (minimumButton != nullptr
+                && minimumButton->isEnabled() == (original.loaded && ! original.loading),
+                "minimum-volume icon is enabled only with loaded audio ready for playback");
+        expect (minimumButton != nullptr && minimumButton->getButtonText().isEmpty()
+                && minimumButton->getWidth() == 32 && minimumButton->getHeight() == 36,
+                "minimum-volume icon is textless and has a 32 x 36 pixel click target");
+        auto* minimumHandler = minimumButton != nullptr ? minimumButton->getAccessibilityHandler() : nullptr;
+        expect (minimumHandler != nullptr && minimumHandler->getTitle() == "Set volume to minimum",
+                "screen reader identifies the minimum-volume action");
+        expect (button->getButtonText().isEmpty(), "mute icon has no visible Mute or Muted label");
+        expect (button->getClickingTogglesState(), "volume icon toggles its state when clicked");
+        expect (button->getWidth() == 32 && button->getHeight() == 36,
+                "mute icon keeps a 32 x 36 pixel click target");
+        expect (button->isEnabled() == (original.loaded && ! original.loading),
+                "mute icon is enabled only with loaded audio ready for playback");
+        expect (button->getName() == "Mute output" && button->getTooltip().containsIgnoreCase ("mute"),
+                "mute icon describes its action for accessibility and tooltips");
+        expectMuteAccessibility (false);
+        if (! original.loaded || ! button->onClick) return;
+
+        processor->setGainDecibels (-6.0f);
+        processor->play();
+        expect (! silent (render (*processor, 512)), "loaded audio is audible before clicking the mute icon");
+        testMinimumVolumeButton();
+        const auto beforeMute = processor->getPlaybackSnapshot();
+        // Calling onClick directly skips JUCE's mouse-handler toggle, so mirror
+        // that state change before exercising the actual editor callback.
+        button->setToggleState (true, juce::dontSendNotification);
+        button->onClick();
+        const auto afterMute = processor->getPlaybackSnapshot();
+        expect (processor->isMuted() && button->getToggleState(), "volume icon click enables mute");
+        expect (button->getButtonText().isEmpty() && button->getName() == "Unmute output",
+                "muted volume icon stays textless and exposes the unmute action");
+        expectMuteAccessibility (true);
+        expect (slider != nullptr && ! slider->isEnabled(), "clicking mute disables volume slider interaction");
+        expect (near (processor->getGainDecibels(), -6.0, 1.0e-4), "volume icon mute preserves the selected gain");
+        expect (afterMute.playing == beforeMute.playing && near (afterMute.positionSeconds, beforeMute.positionSeconds),
+                "volume icon mute preserves playback and position");
+        expect (silent (render (*processor, 128)), "volume icon mute immediately silences audio");
+        const auto beforeUnmute = processor->getPlaybackSnapshot();
+        expect (beforeUnmute.playing && near (beforeUnmute.positionSeconds,
+                beforeMute.positionSeconds + 128.0 / sourceRate), "muted audio keeps advancing the transport");
+        testMinimumVolumeButton();
+
+        button->setToggleState (false, juce::dontSendNotification);
+        button->onClick();
+        const auto afterUnmute = processor->getPlaybackSnapshot();
+        expect (! processor->isMuted() && ! button->getToggleState(), "second volume icon click disables mute");
+        expect (button->getName() == "Mute output" && button->getButtonText().isEmpty(),
+                "unmuted volume icon restores its accessible action without adding text");
+        expectMuteAccessibility (false);
+        expect (slider != nullptr && slider->isEnabled() && near (slider->getValue(), -6.0, 1.0e-4),
+                "clicking unmute restores volume slider interaction and the selected gain");
+        expect (near (processor->getGainDecibels(), -6.0, 1.0e-4), "volume icon unmute preserves the selected gain");
+        expect (afterUnmute.playing == beforeUnmute.playing
+                && near (afterUnmute.positionSeconds, beforeUnmute.positionSeconds),
+                "volume icon unmute preserves playback and position");
+        render (*processor, 512); // Let the 10 ms output-gain ramp settle.
+        expect (render (*processor, 64).getMagnitude (0, 0, 64) > 0.02f,
+                "volume icon unmute restores audible audio");
+
+        processor->setGainDecibels (originalGain);
+        if (original.playing) processor->play();
+        else processor->pause();
+        processor->seekToSeconds (original.positionSeconds);
+    }
+
     void testSpeedButton()
     {
         auto* button = speedButton();
@@ -507,8 +654,16 @@ private:
             expect (editor != nullptr, "create plugin editor");
             if (editor != nullptr)
             {
+                // JUCE accessibility handlers require a native window handle.
+                // Keep the peer hidden while testing real handlers and taking
+                // component snapshots; editor destruction releases the peer.
+                editor->setVisible (false);
+                editor->addToDesktop (0);
+                expect (editor->getWindowHandle() != nullptr, "snapshot editor has a native accessibility peer");
+                expect (! editor->isShowing(), "snapshot editor remains hidden");
                 expect (editor->getWidth() == 600 && editor->getHeight() == 360, "editor remains 600 x 360 pixels");
                 testSpeedButton();
+                testMuteButton();
             }
             if (editor != nullptr && width > 0 && height > 0)
             {
@@ -532,6 +687,48 @@ private:
         });
         if (captureSpeedVariant)
         {
+            addAction ("host automates mute for editor snapshot", [this]
+            {
+                gainBeforeHostMute = processor->getGainDecibels();
+                auto* parameter = processor->getParameterState().getParameter ("mute");
+                expect (parameter != nullptr, "host can access the mute parameter");
+                if (parameter != nullptr) parameter->setValueNotifyingHost (1.0f);
+                screenshotReadyAt = juce::Time::getMillisecondCounterHiRes() + 150.0;
+            });
+            addWait ("muted editor timer refresh", [this]
+            { return juce::Time::getMillisecondCounterHiRes() >= screenshotReadyAt; });
+            addAction ("capture muted editor", [this]
+            {
+                auto* button = muteButton();
+                expect (processor->isMuted() && button != nullptr && button->getToggleState(),
+                        "editor timer synchronises volume icon with host mute automation");
+                expect (button != nullptr && button->getButtonText().isEmpty() && button->getName() == "Unmute output",
+                        "host-muted volume icon stays textless and exposes the unmute action");
+                expectMuteAccessibility (true);
+                auto* slider = volumeSlider();
+                expect (slider != nullptr && ! slider->isEnabled(), "host mute automation disables volume slider interaction");
+                expect (slider != nullptr && near (slider->getValue(), gainBeforeHostMute, 1.0e-4)
+                        && near (processor->getGainDecibels(), gainBeforeHostMute, 1.0e-4),
+                        "host mute automation preserves the selected gain and slider reading");
+                captureEditor ("WaveformPlayer-muted.png");
+                if (auto* parameter = processor->getParameterState().getParameter ("mute"))
+                    parameter->setValueNotifyingHost (0.0f);
+                screenshotReadyAt = juce::Time::getMillisecondCounterHiRes() + 150.0;
+            });
+            addWait ("unmuted editor timer refresh", [this]
+            { return juce::Time::getMillisecondCounterHiRes() >= screenshotReadyAt; });
+            addAction ("host mute reset", [this]
+            {
+                auto* button = muteButton();
+                expect (! processor->isMuted() && button != nullptr && ! button->getToggleState(),
+                        "editor timer synchronises volume icon when host automation unmutes");
+                expectMuteAccessibility (false);
+                auto* slider = volumeSlider();
+                expect (slider != nullptr && slider->isEnabled(), "host unmute automation restores volume slider interaction");
+                expect (slider != nullptr && near (slider->getValue(), gainBeforeHostMute, 1.0e-4)
+                        && near (processor->getGainDecibels(), gainBeforeHostMute, 1.0e-4),
+                        "host unmute automation preserves the selected gain and slider reading");
+            });
             addAction ("select 8x for editor snapshot", [this]
             {
                 if (auto* button = speedButton())
