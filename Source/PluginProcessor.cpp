@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iterator>
 #include <limits>
 
 juce::AudioProcessorValueTreeState::ParameterLayout
@@ -18,6 +19,9 @@ WaveformPlayerAudioProcessor::createParameterLayout()
         juce::ParameterID { "loop", 1 }, "Loop", false));
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "mute", 1 }, "Mute", false));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "speed", 1 }, "Playback Speed",
+        juce::StringArray { "1x", "2x", "4x", "8x" }, 0));
     return layout;
 }
 
@@ -31,6 +35,7 @@ WaveformPlayerAudioProcessor::WaveformPlayerAudioProcessor()
     gainParameter = parameters.getRawParameterValue ("gainDb");
     loopParameter = parameters.getRawParameterValue ("loop");
     muteParameter = parameters.getRawParameterValue ("mute");
+    speedParameter = parameters.getRawParameterValue ("speed");
     metadata.status = "Open an audio file";
     outputGain.setCurrentAndTargetValue (1.0f);
     loaderThread = std::thread ([this] { loaderLoop(); });
@@ -175,7 +180,7 @@ void WaveformPlayerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
     const bool muted = isMuted();
     const bool looping = isLooping();
     outputGain.setTargetValue (muted ? 0.0f : juce::Decibels::decibelsToGain (getGainDecibels()));
-    const auto increment = asset->sampleRate / outputSampleRate;
+    const auto increment = asset->sampleRate / outputSampleRate * getPlaybackSpeed();
     const auto* left = asset->samples.getReadPointer (0);
     const auto* right = asset->samples.getReadPointer (asset->samples.getNumChannels() > 1 ? 1 : 0);
     const auto outputChannels = juce::jmin (2, buffer.getNumChannels());
@@ -307,6 +312,32 @@ void WaveformPlayerAudioProcessor::setMuted (bool shouldMute)
 }
 bool WaveformPlayerAudioProcessor::isMuted() const noexcept { return muteParameter->load (std::memory_order_relaxed) >= 0.5f; }
 
+void WaveformPlayerAudioProcessor::setPlaybackSpeed (int multiplier)
+{
+    const auto choice = std::find (playbackSpeeds.begin(), playbackSpeeds.end(), multiplier);
+    if (choice == playbackSpeeds.end())
+        return;
+    auto* parameter = parameters.getParameter ("speed");
+    parameter->setValueNotifyingHost (parameter->convertTo0to1 (
+        static_cast<float> (std::distance (playbackSpeeds.begin(), choice))));
+}
+
+int WaveformPlayerAudioProcessor::getPlaybackSpeed() const noexcept
+{
+    const auto value = speedParameter->load (std::memory_order_relaxed);
+    const auto index = std::isfinite (value)
+        ? juce::roundToInt (juce::jlimit (0.0f, static_cast<float> (playbackSpeeds.size() - 1), value))
+        : 0;
+    return playbackSpeeds[static_cast<std::size_t> (index)];
+}
+
+void WaveformPlayerAudioProcessor::cyclePlaybackSpeed()
+{
+    const auto current = std::find (playbackSpeeds.begin(), playbackSpeeds.end(), getPlaybackSpeed());
+    const auto next = std::next (current);
+    setPlaybackSpeed (next == playbackSpeeds.end() ? playbackSpeeds.front() : *next);
+}
+
 WaveformPlayerAudioProcessor::PlaybackSnapshot WaveformPlayerAudioProcessor::getPlaybackSnapshot() const
 {
     PlaybackSnapshot result;
@@ -314,6 +345,7 @@ WaveformPlayerAudioProcessor::PlaybackSnapshot WaveformPlayerAudioProcessor::get
         const std::lock_guard<std::mutex> lock (metadataMutex);
         result = metadata;
     }
+    result.playbackSpeed = getPlaybackSpeed();
     if (! result.loaded)
         return result;
 
@@ -562,7 +594,11 @@ void WaveformPlayerAudioProcessor::setStateInformation (const void* data, int si
     if (xml == nullptr || ! xml->hasTagName (parameters.state.getType()))
         return;
     const auto state = juce::ValueTree::fromXml (*xml);
+    const bool hasStoredSpeed = state.getChildWithProperty ("id", "speed").isValid();
     parameters.replaceState (state);
+    // Older sessions predate this parameter and must start at normal speed.
+    if (! hasStoredSpeed)
+        setPlaybackSpeed (playbackSpeeds.front());
     stop();
     const juce::String path = state.getProperty ("filePath");
     const double position = state.getProperty ("positionSeconds", 0.0);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -20,6 +21,7 @@ public:
         double positionSeconds = 0.0;
         double durationSeconds = 0.0;
         double fileSampleRate = 0.0;
+        int playbackSpeed = 1;
         std::uint64_t fileRevision = 0;
         juce::String fileName;
         juce::String status;
@@ -66,6 +68,10 @@ public:
     float getGainDecibels() const noexcept;
     void setMuted (bool shouldMute);
     bool isMuted() const noexcept;
+    static constexpr std::array<int, 4> playbackSpeeds { 1, 2, 4, 8 };
+    void setPlaybackSpeed (int multiplier);
+    int getPlaybackSpeed() const noexcept;
+    void cyclePlaybackSpeed();
 
     // Snapshot strings/files are copied under a non-audio-thread metadata lock.
     PlaybackSnapshot getPlaybackSnapshot() const;
@@ -113,6 +119,7 @@ private:
     std::atomic<float>* gainParameter = nullptr;
     std::atomic<float>* loopParameter = nullptr;
     std::atomic<float>* muteParameter = nullptr;
+    std::atomic<float>* speedParameter = nullptr;
     std::unique_ptr<juce::FileChooser> fileChooser;
 
     mutable std::mutex metadataMutex;

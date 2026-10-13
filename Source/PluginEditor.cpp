@@ -10,20 +10,46 @@ namespace
     const juce::Colour textSecondary { 0xff939393 };
     const juce::Colour accent { 0xffd9d9d9 };
     const juce::Colour errorColour { 0xffececec };
+    constexpr int editorWidth = 600;
+    constexpr int editorHeight = 360;
+    constexpr int headingHeight = 28;
+    constexpr int svgCanvasSize = 16;
 
     juce::Font interfaceFont (const juce::Typeface::Ptr& typeface, float height)
     {
         return juce::Font (typeface).withHeight (height);
     }
 
-    std::unique_ptr<juce::Drawable> volumeIcon (const char* data, int size)
+    std::unique_ptr<juce::Drawable> svgIcon (const char* data, int size)
     {
         auto xml = juce::XmlDocument::parse (juce::String::fromUTF8 (data, size).replace ("currentColor", "#000000"));
+        if (xml != nullptr)
+        {
+            // SVGs without explicit dimensions otherwise inherit JUCE's default viewport.
+            xml->setAttribute ("width", svgCanvasSize);
+            xml->setAttribute ("height", svgCanvasSize);
+        }
         auto drawable = xml != nullptr ? juce::Drawable::createFromSVG (*xml) : nullptr;
         jassert (drawable != nullptr);
+        return drawable;
+    }
+
+    std::unique_ptr<juce::Drawable> volumeIcon (const char* data, int size)
+    {
+        auto drawable = svgIcon (data, size);
         if (drawable != nullptr)
             drawable->replaceColour (juce::Colours::black, textSecondary);
         return drawable;
+    }
+
+    void drawSvgIcon (juce::Graphics& g, const juce::Drawable& icon, juce::Rectangle<float> bounds,
+                      float opacity = 1.0f)
+    {
+        // Preserve the shared SVG canvas instead of fitting each icon's visible paths.
+        const juce::Rectangle<float> viewBox { 0.0f, 0.0f, static_cast<float> (svgCanvasSize),
+                                                           static_cast<float> (svgCanvasSize) };
+        icon.draw (g, opacity, juce::RectanglePlacement (juce::RectanglePlacement::centred)
+                                  .getTransformToFit (viewBox, bounds));
     }
 
     juce::String formatTime (double seconds)
@@ -66,6 +92,10 @@ public:
         loadIcon (4, "forward", BinaryData::fastforwardbtn_svg, BinaryData::fastforwardbtn_svgSize);
         loadIcon (5, "loop", BinaryData::loop_svg, BinaryData::loop_svgSize);
         loadIcon (6, "open", BinaryData::folder2open_svg, BinaryData::folder2open_svgSize);
+        loadIcon (7, "speed1", BinaryData::_1circle_svg, BinaryData::_1circle_svgSize);
+        loadIcon (8, "speed2", BinaryData::_2circle_svg, BinaryData::_2circle_svgSize);
+        loadIcon (9, "speed4", BinaryData::_4circle_svg, BinaryData::_4circle_svgSize);
+        loadIcon (10, "speed8", BinaryData::_8circle_svg, BinaryData::_8circle_svgSize);
     }
 
     juce::Typeface::Ptr getTypefaceForFont (const juce::Font&) override { return interfaceTypeface; }
@@ -83,9 +113,8 @@ public:
                 auto* drawable = highlightedOrActive ? icon.active.get() : icon.normal.get();
                 const auto centreX = static_cast<float> (button.getWidth()) * 0.5f;
                 const auto centreY = static_cast<float> (button.getHeight()) * 0.5f + (down ? 1.0f : 0.0f);
-                const auto size = 16.0f;
-                drawable->drawWithin (g, { centreX - size * 0.5f, centreY - size * 0.5f, size, size },
-                                      juce::RectanglePlacement::centred, opacity);
+                const auto size = static_cast<float> (svgCanvasSize);
+                drawSvgIcon (g, *drawable, { centreX - size * 0.5f, centreY - size * 0.5f, size, size }, opacity);
                 if (button.getToggleState())
                 {
                     g.setColour (textPrimary.withAlpha (opacity));
@@ -159,11 +188,7 @@ private:
 
     void loadIcon (size_t index, const juce::String& id, const char* data, int size)
     {
-        auto xml = juce::XmlDocument::parse (juce::String::fromUTF8 (data, size).replace ("currentColor", "#000000"));
-        if (xml == nullptr)
-            return;
-        auto drawable = juce::Drawable::createFromSVG (*xml);
-        jassert (drawable != nullptr);
+        auto drawable = svgIcon (data, size);
         if (drawable == nullptr)
             return;
 
@@ -185,7 +210,7 @@ private:
     }
 
     juce::Typeface::Ptr interfaceTypeface;
-    std::array<Icon, 7> icons;
+    std::array<Icon, 11> icons;
 };
 
 class WaveformPlayerAudioProcessorEditor::WaveformDisplay final : public juce::Component,
@@ -392,12 +417,10 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
     setLookAndFeel (playerLookAndFeel.get());
     tooltips.setLookAndFeel (playerLookAndFeel.get());
     setOpaque (true);
-    setResizable (true, false);
-    setResizeLimits (700, 400, 1400, 900);
+    setResizable (false, false);
 
     titleLabel.setText ("Waveform Player", juce::dontSendNotification);
     titleLabel.setFont (interfaceFont (interfaceTypeface, 25.0f));
-    subtitleLabel.setText (juce::String::fromUTF8 ("Standalone audio playback  ·  1.0×"), juce::dontSendNotification);
     subtitleLabel.setFont (interfaceFont (interfaceTypeface, 12.0f));
     subtitleLabel.setJustificationType (juce::Justification::centredRight);
     volumeValueLabel.setFont (interfaceFont (interfaceTypeface, 14.0f));
@@ -424,6 +447,8 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
     forwardButton.setComponentID ("forward");
     configureButton (loopButton, "Loop Off", "Repeat the whole audio file");
     loopButton.setComponentID ("loop");
+    configureButton (speedButton, "Speed 1x", "Click to cycle playback speed: 1x, 2x, 4x, 8x");
+    speedButton.setComponentID ("speed1");
     configureButton (muteButton, "Mute", "Mute the output without changing the volume setting");
     loopButton.setClickingTogglesState (true);
     muteButton.setClickingTogglesState (true);
@@ -435,6 +460,7 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
     stopButton.onClick = [this] { audioProcessor.stop(); updateFromProcessor(); };
     forwardButton.onClick = [this] { audioProcessor.skipSeconds (5.0); updateFromProcessor(); };
     loopButton.onClick = [this] { audioProcessor.setLooping (loopButton.getToggleState()); updateFromProcessor(); };
+    speedButton.onClick = [this] { audioProcessor.cyclePlaybackSpeed(); updateFromProcessor(); };
     muteButton.onClick = [this] { audioProcessor.setMuted (muteButton.getToggleState()); updateFromProcessor(); };
     waveform->onSeek = [this] (double seconds) { audioProcessor.seekToSeconds (seconds); };
     addAndMakeVisible (*waveform);
@@ -452,7 +478,8 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
     };
     addAndMakeVisible (volumeSlider);
 
-    setSize (820, 480);
+    setSize (editorWidth, editorHeight);
+    setResizeLimits (editorWidth, editorHeight, editorWidth, editorHeight);
     updateFromProcessor();
     startTimerHz (30);
 }
@@ -481,29 +508,29 @@ void WaveformPlayerAudioProcessorEditor::paint (juce::Graphics& g)
     g.fillAll (background);
     drawPanel (g, volumePanelBounds.toFloat());
     if (volumeOffIcon != nullptr)
-        volumeOffIcon->drawWithin (g, volumeOffIconBounds.toFloat(), juce::RectanglePlacement::centred, 1.0f);
+        drawSvgIcon (g, *volumeOffIcon, volumeOffIconBounds.toFloat());
     if (volumeUpIcon != nullptr)
-        volumeUpIcon->drawWithin (g, volumeUpIconBounds.toFloat(), juce::RectanglePlacement::centred, 1.0f);
+        drawSvgIcon (g, *volumeUpIcon, volumeUpIconBounds.toFloat());
     g.setColour (textSecondary);
     g.setFont (interfaceFont (interfaceTypeface, 11.0f));
-    g.drawText ("v0.2", getWidth() - 67, 20, 43, 36, juce::Justification::centred);
+    g.drawText ("v0.2", getWidth() - 67, 20, 43, headingHeight, juce::Justification::centred);
 }
 
 void WaveformPlayerAudioProcessorEditor::resized()
 {
     const auto gap = getHeight() < 440 ? 12 : 16;
     auto bounds = getLocalBounds().reduced (24, 20);
-    auto heading = bounds.removeFromTop (36);
+    auto heading = bounds.removeFromTop (headingHeight);
     heading.removeFromRight (43);
     heading.removeFromRight (16);
     subtitleLabel.setBounds (heading.removeFromRight (270));
     heading.removeFromRight (16);
-    titleLabel.setBounds (heading);
-    bounds.removeFromTop (gap);
+    titleLabel.setBounds (heading.withTrimmedLeft (8));
+    bounds.removeFromTop (8);
 
     auto controls = bounds.removeFromBottom (36);
-    const auto buttonWidth = (controls.getWidth() - 6 * 8) / 7;
-    for (auto* button : { &openButton, &rewindButton, &playButton, &pauseButton, &stopButton, &forwardButton, &loopButton })
+    const auto buttonWidth = (controls.getWidth() - 7 * 8) / 8;
+    for (auto* button : { &openButton, &rewindButton, &playButton, &pauseButton, &stopButton, &forwardButton, &loopButton, &speedButton })
     {
         button->setBounds (controls.removeFromLeft (buttonWidth));
         controls.removeFromLeft (8);
@@ -541,6 +568,16 @@ void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
     loopButton.setEnabled (available);
     volumeSlider.setEnabled (available);
     muteButton.setEnabled (available);
+
+    const auto speed = snapshot.playbackSpeed;
+    const auto speedText = juce::String (speed) + "x";
+    speedButton.setComponentID ("speed" + juce::String (speed));
+    speedButton.setButtonText ("Speed " + speedText);
+    speedButton.setName ("Playback speed: " + speedText);
+    speedButton.setTooltip ("Playback speed: " + speedText + ". Click to cycle 1x, 2x, 4x, 8x.");
+    speedButton.setDescription (speedButton.getTooltip());
+    subtitleLabel.setText (juce::String::fromUTF8 ("Standalone audio playback  ·  ") + juce::String (speed)
+                           + juce::String::fromUTF8 ("×"), juce::dontSendNotification);
 
     const auto looping = audioProcessor.isLooping();
     loopButton.setToggleState (looping, juce::dontSendNotification);

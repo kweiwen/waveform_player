@@ -32,6 +32,12 @@
         <FILE id="WfVolOff" name="volume-off.svg" compile="0" resource="1"
               file="Resource/SVG/volume-off.svg"/>
         <FILE id="WfVolUp" name="volume-up.svg" compile="0" resource="1" file="Resource/SVG/volume-up.svg"/>
+        <FILE id="WfSpeed1" name="1-circle.svg" compile="0" resource="1" file="Resource/SVG/1-circle.svg"/>
+        <FILE id="WfSpeed2" name="2-circle.svg" compile="0" resource="1" file="Resource/SVG/2-circle.svg"/>
+        <FILE id="WfSpeed4" name="4-circle.svg" compile="0" resource="1" file="Resource/SVG/4-circle.svg"/>
+        <FILE id="WfSpeed8" name="8-circle.svg" compile="0" resource="1" file="Resource/SVG/8-circle.svg"/>
+        <FILE id="WfIconsLicense" name="Bootstrap-Icons-LICENSE.txt" compile="0" resource="0" xcodeResource="1"
+              file="Resource/SVG/Bootstrap-Icons-LICENSE.txt"/>
       </GROUP>
       <GROUP id="WfFonts" name="Fonts">
         <FILE id="WfRes6" name="Play-Bold.ttf" compile="0" resource="1" file="Resource/Fonts/Play-Bold.ttf"/>

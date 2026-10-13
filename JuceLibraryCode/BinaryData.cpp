@@ -51,10 +51,16 @@ const char* fastforwardbtn_svg = (const char*) temp_binary_data_4;
 
 //================== loop.svg ==================
 static const unsigned char temp_binary_data_5[] =
-"<?xml version=\"1.0\" encoding=\"utf-8\"?><!-- Uploaded to: SVG Repo, www.svgrepo.com, Generator: SVG Repo Mixer Tools -->\r\n"
-"<svg width=\"800px\" height=\"800px\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\">\r\n"
-"<path d=\"M18 4L21 7M21 7L18 10M21 7H7C4.79086 7 3 8.79086 3 11M6 20L3 17M3 17L6 14M3 17H17C19.2091 17 21 15.2091 21 13\" stroke=\"#000000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\r\n"
-"</svg>";
+"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+"<!-- Generator: Adobe Illustrator 25.3.1, SVG Export Plug-In . SVG Version: 6.00 Build 0)  -->\n"
+"<svg version=\"1.1\" id=\"Layer_1\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" x=\"0px\" y=\"0px\"\n"
+"\t viewBox=\"0 0 16 16\" style=\"enable-background:new 0 0 16 16;\" xml:space=\"preserve\">\n"
+"<style type=\"text/css\">\n"
+"\t.st0{fill:none;stroke:#000000;stroke-width:1.3672;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:133.3333;}\n"
+"</style>\n"
+"<path class=\"st0\" d=\"M12.9,0.7l2.4,2.7 M15.3,3.4l-2.4,2.7 M15.3,3.4H3.9c-1.8,0-3.3,1.6-3.3,3.7 M3.1,15.3l-2.4-2.7 M0.7,12.6\n"
+"\tl2.4-2.7 M0.7,12.6h11.4c1.8,0,3.3-1.6,3.3-3.7\"/>\n"
+"</svg>\n";
 
 const char* loop_svg = (const char*) temp_binary_data_5;
 
@@ -86,8 +92,44 @@ static const unsigned char temp_binary_data_8[] =
 
 const char* volumeup_svg = (const char*) temp_binary_data_8;
 
-//================== Play-Bold.ttf ==================
+//================== 1-circle.svg ==================
 static const unsigned char temp_binary_data_9[] =
+"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" fill=\"currentColor\" class=\"bi bi-1-circle\" viewBox=\"0 0 16 16\">\n"
+"  <path d=\"M1 8a7 7 0 1 0 14 0A7 7 0 0 0 1 8m15 0A8 8 0 1 1 0 8a8 8 0 0 1 16 0M9.283 4.002V12H7.971V5.338h-.065L6.072 6.656V5.385l1.899-1.383z\"/>\n"
+"</svg>";
+
+const char* _1circle_svg = (const char*) temp_binary_data_9;
+
+//================== 2-circle.svg ==================
+static const unsigned char temp_binary_data_10[] =
+"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" fill=\"currentColor\" class=\"bi bi-2-circle\" viewBox=\"0 0 16 16\">\n"
+"  <path d=\"M1 8a7 7 0 1 0 14 0A7 7 0 0 0 1 8m15 0A8 8 0 1 1 0 8a8 8 0 0 1 16 0M6.646 6.24v.07H5.375v-.064c0-1.213.879-2.402 2.637-2.402 1.582 0 2.613.949 2.613 2.215 0 1.002-.6 1.667-1.287 2.43l-.096.107-1.974 2.22v.077h3.498V12H5.422v-.832l2.97-3.2"
+"93c.434-.475.903-1.008.903-1.705 0-.744-.557-1.236-1.313-1.236-.843 0-1.336.615-1.336 1.306\"/>\n"
+"</svg>";
+
+const char* _2circle_svg = (const char*) temp_binary_data_10;
+
+//================== 4-circle.svg ==================
+static const unsigned char temp_binary_data_11[] =
+"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" fill=\"currentColor\" class=\"bi bi-4-circle\" viewBox=\"0 0 16 16\">\n"
+"  <path d=\"M7.519 5.057q.33-.527.657-1.055h1.933v5.332h1.008v1.107H10.11V12H8.85v-1.559H4.978V9.322c.77-1.427 1.656-2.847 2.542-4.265ZM6.225 9.281v.053H8.85V5.063h-.065c-.867 1.33-1.787 2.806-2.56 4.218\"/>\n"
+"  <path d=\"M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0M1 8a7 7 0 1 0 14 0A7 7 0 0 0 1 8\"/>\n"
+"</svg>";
+
+const char* _4circle_svg = (const char*) temp_binary_data_11;
+
+//================== 8-circle.svg ==================
+static const unsigned char temp_binary_data_12[] =
+"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" fill=\"currentColor\" class=\"bi bi-8-circle\" viewBox=\"0 0 16 16\">\n"
+"  <path d=\"M1 8a7 7 0 1 0 14 0A7 7 0 0 0 1 8m15 0A8 8 0 1 1 0 8a8 8 0 0 1 16 0m-5.03 1.803c0 1.394-1.218 2.355-2.988 2.355-1.763 0-2.953-.955-2.953-2.344 0-1.271.95-1.851 1.647-2.003v-.065c-.621-.193-1.33-.738-1.33-1.781 0-1.225 1.09-2.121 2.66-2.12"
+"1s2.654.896 2.654 2.12c0 1.061-.738 1.595-1.336 1.782v.065c.703.152 1.647.744 1.647 1.992Zm-4.347-3.71c0 .739.586 1.255 1.383 1.255s1.377-.516 1.377-1.254c0-.733-.58-1.23-1.377-1.23s-1.383.497-1.383 1.23Zm-.281 3.645c0 .838.72 1.412 1.664 1.412.943 0"
+" 1.658-.574 1.658-1.412 0-.843-.715-1.424-1.658-1.424-.944 0-1.664.58-1.664 1.424\"/>\n"
+"</svg>";
+
+const char* _8circle_svg = (const char*) temp_binary_data_12;
+
+//================== Play-Bold.ttf ==================
+static const unsigned char temp_binary_data_13[] =
 { 0,1,0,0,0,17,1,0,0,4,0,16,71,68,69,70,195,75,194,177,0,0,3,236,0,0,2,108,71,80,79,83,138,184,186,181,0,0,86,72,0,0,24,186,71,83,85,66,197,127,178,0,0,0,66,240,0,0,19,88,79,83,47,50,86,239,160,177,0,0,1,160,0,0,0,96,99,109,97,112,136,247,71,177,0,0,10,
 252,0,0,8,32,99,118,116,32,24,211,57,226,0,0,2,224,0,0,1,10,102,112,103,109,81,38,142,123,0,0,19,28,0,0,13,109,103,97,115,112,0,0,0,16,0,0,1,28,0,0,0,8,103,108,121,102,132,181,239,150,0,0,150,136,0,2,98,149,104,101,97,100,12,3,240,58,0,0,1,104,0,0,0,
 54,104,104,101,97,6,210,7,186,0,0,1,68,0,0,0,36,104,109,116,120,130,9,104,119,0,0,32,140,0,0,17,46,108,111,99,97,5,61,63,43,0,0,49,188,0,0,17,52,109,97,120,112,5,180,14,122,0,0,1,36,0,0,0,32,110,97,109,101,114,197,144,232,0,0,6,88,0,0,4,162,112,111,115,
@@ -2230,7 +2272,7 @@ static const unsigned char temp_binary_data_9[] =
 1,88,75,13,11,2,9,9,86,9,76,89,89,64,22,45,44,43,42,41,40,39,38,37,36,17,19,35,36,19,35,36,17,16,14,11,29,43,19,35,53,51,53,52,54,54,51,50,23,21,38,35,34,6,21,21,51,53,52,54,54,51,50,23,21,38,35,34,6,21,21,51,21,35,17,35,17,35,17,35,1,51,17,35,101,91,
 91,39,81,68,34,52,43,20,37,28,175,39,81,68,34,52,43,20,37,28,123,123,146,175,146,2,130,146,146,1,138,90,73,59,67,27,5,90,5,23,32,81,73,59,67,27,5,90,5,23,32,81,90,254,118,1,138,254,118,2,188,253,68,0,0,0,0,0 };
 
-const char* PlayBold_ttf = (const char*) temp_binary_data_9;
+const char* PlayBold_ttf = (const char*) temp_binary_data_13;
 
 
 const char* getNamedResource (const char* resourceNameUTF8, int& numBytes);
@@ -2249,10 +2291,14 @@ const char* getNamedResource (const char* resourceNameUTF8, int& numBytes)
         case 0x10d5374b:  numBytes = 318; return pausebtn_svg;
         case 0x5c832fbf:  numBytes = 246; return stopbtn_svg;
         case 0x319b9af8:  numBytes = 300; return fastforwardbtn_svg;
-        case 0x8693c249:  numBytes = 433; return loop_svg;
+        case 0x8693c249:  numBytes = 682; return loop_svg;
         case 0xbb7f8c73:  numBytes = 619; return folder2open_svg;
         case 0x7d1e133a:  numBytes = 357; return volumeoff_svg;
         case 0xd501e25a:  numBytes = 750; return volumeup_svg;
+        case 0x188157a7:  numBytes = 279; return _1circle_svg;
+        case 0xad660a68:  numBytes = 477; return _2circle_svg;
+        case 0xd72f6fea:  numBytes = 421; return _4circle_svg;
+        case 0x2ac23aee:  numBytes = 717; return _8circle_svg;
         case 0x520630a0:  numBytes = 194848; return PlayBold_ttf;
         default: break;
     }
@@ -2272,6 +2318,10 @@ const char* namedResourceList[] =
     "folder2open_svg",
     "volumeoff_svg",
     "volumeup_svg",
+    "_1circle_svg",
+    "_2circle_svg",
+    "_4circle_svg",
+    "_8circle_svg",
     "PlayBold_ttf"
 };
 
@@ -2286,6 +2336,10 @@ const char* originalFilenames[] =
     "folder2-open.svg",
     "volume-off.svg",
     "volume-up.svg",
+    "1-circle.svg",
+    "2-circle.svg",
+    "4-circle.svg",
+    "8-circle.svg",
     "Play-Bold.ttf"
 };
 

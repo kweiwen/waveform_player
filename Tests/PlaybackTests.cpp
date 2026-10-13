@@ -119,6 +119,7 @@ public:
         configure (*processor, 48000.0, 2);
         addAction ("empty processor", [this]
         {
+            expect (processor->getPlaybackSpeed() == 1, "new processor defaults to 1x playback speed");
             processor->play();
             const auto output = render (*processor, 128);
             expect (! processor->getPlaybackSnapshot().loaded, "empty processor reports no loaded audio");
@@ -128,9 +129,10 @@ public:
         addScreenshot ("WaveformPlayer-empty.png", 0, 0);
         addLoad (stereoFile);
         addAction ("WAV metadata and transport", [this] { testTransport(); });
-        addScreenshot ("WaveformPlayer-ui.png", 0, 0);
-        addScreenshot ("WaveformPlayer-minimum.png", 700, 400);
+        addScreenshot ("WaveformPlayer-ui.png", 0, 0, true);
+        addScreenshot ("WaveformPlayer-fixed-size.png", 700, 400);
         addAction ("host rates and channel layouts", [this] { testRatesAndLayouts(); });
+        addAction ("speed controls and automation", [this] { testSpeedControls(); });
         addAction ("invalid file request", [this]
         {
             configure (*processor, sourceRate, 2);
@@ -154,6 +156,7 @@ public:
         addAction ("replacement audio and gain", [this] { testGainAndMono(); });
         addLoad (shortFile);
         addAction ("EOF and looping", [this] { testEndAndLooping(); });
+        addAction ("speed EOF and looping", [this] { testSpeedEndAndLooping(); });
         addLoad (flacFile);
         addAction ("FLAC decoding", [this]
         {
@@ -191,6 +194,7 @@ public:
             processor->setLooping (true);
             processor->setGainDecibels (-9.0f);
             processor->setMuted (true);
+            processor->setPlaybackSpeed (4);
             render (*processor, 1);
             processor->getStateInformation (savedState);
             restored = std::make_unique<Processor>();
@@ -216,11 +220,49 @@ public:
                       << " dB (target -9 dB).\n";
             expect (near (restored->getGainDecibels(), -9.0, 1.0e-4), "state restores gain");
             expect (restored->isMuted(), "state restores mute");
+            expect (restored->getPlaybackSpeed() == 4, "state restores 4x playback speed");
             expect (silent (render (*restored, 128)), "restored paused output is silent");
             juce::MemoryBlock malformed;
             malformed.append ("broken-state", 12);
             restored->setStateInformation (malformed.getData(), static_cast<int> (malformed.getSize()));
             expect (restored->getPlaybackSnapshot().file == stereoFile, "malformed state does not discard loaded audio");
+            expect (restored->getPlaybackSpeed() == 4, "malformed state preserves playback speed");
+            processor->setPlaybackSpeed (1);
+        });
+        addAction ("restore legacy state without speed", [this]
+        {
+            auto xml = Processor::getXmlFromBinary (savedState.getData(), static_cast<int> (savedState.getSize()));
+            expect (xml != nullptr, "saved state has XML for legacy-state fixture");
+            if (xml == nullptr) return;
+            auto legacyState = juce::ValueTree::fromXml (*xml);
+            int removed = 0;
+            for (int child = legacyState.getNumChildren(); --child >= 0;)
+                if (legacyState.getChild (child).getProperty ("id").toString() == "speed")
+                {
+                    legacyState.removeChild (child, nullptr);
+                    ++removed;
+                }
+            expect (removed == 1, "legacy-state fixture removes the saved speed parameter");
+            juce::MemoryBlock legacyData;
+            if (auto legacyXml = legacyState.createXml())
+                Processor::copyXmlToBinary (*legacyXml, legacyData);
+            restored->setPlaybackSpeed (8);
+            restored->setStateInformation (legacyData.getData(), static_cast<int> (legacyData.getSize()));
+            expect (restored->getPlaybackSpeed() == 1, "legacy state without speed resets prior 8x setting to 1x");
+        });
+        addWait ("legacy state audio reload", [this]
+        {
+            render (*restored, 1);
+            const auto snapshot = restored->getPlaybackSnapshot();
+            return snapshot.loaded && ! snapshot.loading;
+        });
+        addAction ("legacy state restores transport", [this]
+        {
+            const auto snapshot = restored->getPlaybackSnapshot();
+            expect (snapshot.file == stereoFile && ! snapshot.playing,
+                    "legacy state keeps the file and paused transport");
+            expect (near (snapshot.positionSeconds, 12345.0 / sourceRate),
+                    "legacy state keeps the saved playback position");
         });
         addAction ("restore valid empty state", [this]
         {
@@ -416,13 +458,65 @@ private:
         });
     }
 
-    void addScreenshot (const juce::String& name, int width, int height)
+    void captureEditor (const juce::String& name)
+    {
+        const auto directory = juce::SystemStats::getEnvironmentVariable ("WAVEFORM_PLAYER_TEST_RESULTS", {});
+        if (editor == nullptr || directory.isEmpty()) return;
+        juce::File outputDirectory (directory);
+        outputDirectory.createDirectory();
+        const auto screenshotFile = outputDirectory.getChildFile (name);
+        screenshotFile.deleteFile();
+        auto stream = screenshotFile.createOutputStream();
+        juce::PNGImageFormat png;
+        expect (stream != nullptr && png.writeImageToStream (
+            editor->createComponentSnapshot (editor->getLocalBounds()), *stream), "write editor snapshot " + name);
+    }
+
+    juce::Button* speedButton() const
+    {
+        if (editor == nullptr) return nullptr;
+        return dynamic_cast<juce::Button*> (editor->findChildWithID (
+            "speed" + juce::String (processor->getPlaybackSpeed())));
+    }
+
+    void testSpeedButton()
+    {
+        auto* button = speedButton();
+        expect (button != nullptr && button->isEnabled(), "speed button is available with or without loaded audio");
+        if (button == nullptr || ! button->onClick) return;
+        const auto before = processor->getPlaybackSnapshot();
+        for (const auto speed : { 2, 4, 8, 1 })
+        {
+            button->onClick();
+            expect (processor->getPlaybackSpeed() == speed, "speed button cycles to " + juce::String (speed) + "x");
+            expect (button->getComponentID() == "speed" + juce::String (speed),
+                    "speed button displays the selected " + juce::String (speed) + "x icon");
+        }
+        const auto after = processor->getPlaybackSnapshot();
+        expect (after.loaded == before.loaded && after.playing == before.playing
+                && near (after.positionSeconds, before.positionSeconds),
+                "speed button cycle preserves loaded audio, transport and position");
+        processor->setPlaybackSpeed (1);
+    }
+
+    void addScreenshot (const juce::String& name, int width, int height, bool captureSpeedVariant = false)
     {
         addAction ("create editor for " + name, [this, width, height]
         {
             editor.reset (processor->createEditor());
             expect (editor != nullptr, "create plugin editor");
-            if (editor != nullptr && width > 0 && height > 0) editor->setSize (width, height);
+            if (editor != nullptr)
+            {
+                expect (editor->getWidth() == 600 && editor->getHeight() == 360, "editor remains 600 x 360 pixels");
+                testSpeedButton();
+            }
+            if (editor != nullptr && width > 0 && height > 0)
+            {
+                const auto boundsBeforeResize = editor->getBounds();
+                expect (! editor->isResizable(), "host resizing is disabled");
+                editor->setBoundsConstrained (boundsBeforeResize.withSize (width, height));
+                expect (editor->getBounds() == boundsBeforeResize, "host resize attempt preserves fixed editor bounds");
+            }
             // Paint once to begin the normal startup animation, then capture
             // the settled interface after the JUCE badge has naturally faded.
             if (editor != nullptr)
@@ -431,22 +525,30 @@ private:
         });
         addWait ("editor timer refresh", [this]
         { return juce::Time::getMillisecondCounterHiRes() >= screenshotReadyAt; });
-        addAction ("capture " + name, [this, name]
+        addAction ("capture " + name, [this, name, captureSpeedVariant]
         {
-            const auto directory = juce::SystemStats::getEnvironmentVariable ("WAVEFORM_PLAYER_TEST_RESULTS", {});
-            if (editor != nullptr && directory.isNotEmpty())
-            {
-                juce::File outputDirectory (directory);
-                outputDirectory.createDirectory();
-                const auto screenshotFile = outputDirectory.getChildFile (name);
-                screenshotFile.deleteFile();
-                auto stream = screenshotFile.createOutputStream();
-                juce::PNGImageFormat png;
-                expect (stream != nullptr && png.writeImageToStream (
-                    editor->createComponentSnapshot (editor->getLocalBounds()), *stream), "write editor snapshot " + name);
-            }
-            editor.reset();
+            captureEditor (name);
+            if (! captureSpeedVariant) editor.reset();
         });
+        if (captureSpeedVariant)
+        {
+            addAction ("select 8x for editor snapshot", [this]
+            {
+                if (auto* button = speedButton())
+                    for (int click = 0; click < 3; ++click)
+                        if (button->onClick) button->onClick();
+                expect (processor->getPlaybackSpeed() == 8, "editor snapshot selects 8x through the speed button");
+                screenshotReadyAt = juce::Time::getMillisecondCounterHiRes() + 150.0;
+            });
+            addWait ("8x editor timer refresh", [this]
+            { return juce::Time::getMillisecondCounterHiRes() >= screenshotReadyAt; });
+            addAction ("capture 8x editor", [this]
+            {
+                captureEditor ("WaveformPlayer-speed-8x.png");
+                processor->setPlaybackSpeed (1);
+                editor.reset();
+            });
+        }
     }
 
     void testTransport()
@@ -506,24 +608,112 @@ private:
     {
         for (const auto rate : { 44100.0, 48000.0, 88200.0, 96000.0 })
             for (const auto channels : { 1, 2 })
+                for (const auto speed : { 1, 2, 4, 8 })
             {
-                const auto label = juce::String (rate, 0) + " Hz / " + juce::String (channels) + " channel(s)";
+                const auto label = juce::String (rate, 0) + " Hz / " + juce::String (channels)
+                    + " channel(s) / " + juce::String (speed) + "x";
                 configure (*processor, rate, channels);
                 processor->setGainDecibels (0.0f);
                 processor->setMuted (false);
                 processor->setLooping (false);
+                processor->setPlaybackSpeed (speed);
                 processor->seekToSeconds (1.0);
                 processor->play();
                 const auto output = render (*processor, 257);
                 expect (processor->getPlaybackSnapshot().playing, label + " plays independently of DAW transport");
-                expect (near (processor->getPlaybackSnapshot().positionSeconds, 1.0 + 257.0 / rate, 1.0 / sourceRate), label + " plays at fixed 1.0x speed");
-                expect (output.getMagnitude (0, 0, 257) > 0.001f, label + " produces audio");
-                if (channels == 2)
+                expect (near (processor->getPlaybackSnapshot().positionSeconds,
+                              1.0 + 257.0 * speed / rate, 1.0e-9), label + " advances source position at the selected speed");
+                bool samplesCorrect = true;
+                for (int frame = 0; frame < output.getNumSamples(); ++frame)
                 {
-                    expect (near (output.getSample (0, 0), stereoSample (0, 48000), 2.0e-5), label + " preserves left channel");
-                    expect (near (output.getSample (1, 0), stereoSample (1, 48000), 2.0e-5), label + " preserves right channel");
+                    const auto sourceFrame = 48000.0 + frame * sourceRate * speed / rate;
+                    const auto first = static_cast<int> (sourceFrame);
+                    const auto fraction = sourceFrame - first;
+                    const auto sampleAt = [first, fraction] (int channel)
+                    {
+                        const auto a = stereoSample (channel, first);
+                        return a + fraction * (stereoSample (channel, first + 1) - a);
+                    };
+                    if (channels == 2)
+                        for (int channel = 0; channel < channels; ++channel)
+                            samplesCorrect = samplesCorrect && near (output.getSample (channel, frame), sampleAt (channel), 2.0e-5);
+                    else
+                        samplesCorrect = samplesCorrect && near (output.getSample (0, frame),
+                            0.5 * (sampleAt (0) + sampleAt (1)), 2.0e-5);
                 }
+                expect (samplesCorrect, label + " samples the expected source frames with channel conversion");
             }
+        processor->setPlaybackSpeed (1);
+    }
+
+    void testSpeedControls()
+    {
+        expect (processor->getPlaybackSpeed() == 1, "default playback speed is 1x");
+        for (const auto speed : { 2, 4, 8, 1 })
+        {
+            processor->cyclePlaybackSpeed();
+            expect (processor->getPlaybackSpeed() == speed, "speed cycle selects " + juce::String (speed) + "x");
+        }
+        processor->setPlaybackSpeed (4);
+        for (const auto invalid : { -1, 0, 3, 5, 16 })
+        {
+            processor->setPlaybackSpeed (invalid);
+            expect (processor->getPlaybackSpeed() == 4, "invalid speed " + juce::String (invalid) + " preserves 4x");
+        }
+
+        auto* choice = dynamic_cast<juce::AudioParameterChoice*> (processor->getParameterState().getParameter ("speed"));
+        expect (choice != nullptr, "speed is an automatable AudioParameterChoice");
+        if (choice != nullptr)
+        {
+            expect (choice->choices.size() == 4, "speed automation offers four choices");
+            int index = 0;
+            for (const auto speed : { 1, 2, 4, 8 })
+            {
+                processor->setPlaybackSpeed (speed);
+                expect (choice->getIndex() == index, "setting " + juce::String (speed) + "x updates automation index");
+                ++index;
+            }
+            index = 0;
+            for (const auto speed : { 1, 2, 4, 8 })
+            {
+                choice->setValueNotifyingHost (choice->convertTo0to1 (static_cast<float> (index++)));
+                expect (processor->getPlaybackSpeed() == speed
+                        && processor->getPlaybackSnapshot().playbackSpeed == speed,
+                        "host automation selects " + juce::String (speed) + "x in controls and snapshots");
+            }
+        }
+
+        configure (*processor, sourceRate, 2);
+        processor->setPlaybackSpeed (1);
+        processor->seekToSeconds (1.0);
+        processor->play();
+        render (*processor, 64);
+        const auto playingPosition = processor->getPlaybackSnapshot().positionSeconds;
+        processor->setPlaybackSpeed (8);
+        auto snapshot = processor->getPlaybackSnapshot();
+        expect (snapshot.playing && near (snapshot.positionSeconds, playingPosition),
+                "changing speed while playing preserves transport and position");
+        const auto faster = render (*processor, 17);
+        expect (near (faster.getSample (0, 0), stereoSample (0, 48064), 2.0e-5),
+                "speed change starts from the current source position");
+        expect (near (processor->getPlaybackSnapshot().positionSeconds, 48200.0 / sourceRate),
+                "next callback advances at 8x after speed change");
+        processor->pause();
+        render (*processor, 1);
+        const auto pausedPosition = processor->getPlaybackSnapshot().positionSeconds;
+        processor->setPlaybackSpeed (2);
+        snapshot = processor->getPlaybackSnapshot();
+        expect (! snapshot.playing && near (snapshot.positionSeconds, pausedPosition),
+                "changing speed while paused preserves transport and position");
+        expect (silent (render (*processor, 64))
+                && near (processor->getPlaybackSnapshot().positionSeconds, pausedPosition),
+                "speed change while paused continues to emit silence without advancing");
+        processor->play();
+        const auto resumed = render (*processor, 17);
+        expect (near (resumed.getSample (0, 0), stereoSample (0, 48200), 2.0e-5)
+                && near (processor->getPlaybackSnapshot().positionSeconds, 48234.0 / sourceRate),
+                "resume uses the selected 2x speed from the paused position");
+        processor->setPlaybackSpeed (1);
     }
 
     void testGainAndMono()
@@ -587,6 +777,70 @@ private:
         expect (wrapsCorrectly, "Loop ON wraps the entire file sample-for-sample within a block");
         expect (processor->getPlaybackSnapshot().playing, "Loop ON remains playing across EOF");
         expect (near (processor->getPlaybackSnapshot().positionSeconds, 29.0 / sourceRate), "loop position wraps by source sample count");
+    }
+
+    void testSpeedEndAndLooping()
+    {
+        for (const auto speed : { 1, 2, 4, 8 })
+        {
+            configure (*processor, sourceRate, 2);
+            processor->setGainDecibels (0.0f);
+            processor->setMuted (false);
+            processor->setLooping (false);
+            processor->setPlaybackSpeed (speed);
+            processor->seekToSeconds (27.0 / sourceRate);
+            processor->play();
+            const auto output = render (*processor, 64);
+            bool tailCorrect = true;
+            for (int channel = 0; channel < 2; ++channel)
+                for (int frame = 0; frame < output.getNumSamples(); ++frame)
+                {
+                    const auto sourceFrame = 27 + frame * speed;
+                    const auto expected = sourceFrame < shortLength ? shortSample (channel, sourceFrame) : 0.0f;
+                    tailCorrect = tailCorrect && near (output.getSample (channel, frame), expected, 2.0e-5);
+                }
+            const auto label = juce::String (speed) + "x";
+            expect (tailCorrect, label + " emits valid final source frames then silence at EOF");
+            const auto snapshot = processor->getPlaybackSnapshot();
+            expect (! snapshot.playing && near (snapshot.positionSeconds, 0.0), label + " stops and resets position at EOF");
+            expect (silent (render (*processor, 64)), label + " stays silent after EOF");
+        }
+
+        // At 8 kHz / 8x the source advances 48 frames per host sample, crossing
+        // more than the entire 31-frame fixture. At 96 kHz interpolation also
+        // crosses the loop seam at fractional source positions.
+        for (const auto rate : { 8000.0, 48000.0, 96000.0 })
+            for (const auto speed : { 1, 2, 4, 8 })
+            {
+                configure (*processor, rate, 2);
+                processor->setLooping (true);
+                processor->setPlaybackSpeed (speed);
+                processor->seekToSeconds (27.0 / sourceRate);
+                processor->play();
+                const auto output = render (*processor, 64);
+                const auto increment = sourceRate * speed / rate;
+                bool samplesCorrect = true;
+                for (int channel = 0; channel < 2; ++channel)
+                    for (int frame = 0; frame < output.getNumSamples(); ++frame)
+                    {
+                        const auto sourceFrame = std::fmod (27.0 + frame * increment, static_cast<double> (shortLength));
+                        const auto first = static_cast<int> (sourceFrame);
+                        const auto fraction = sourceFrame - first;
+                        const auto a = shortSample (channel, first);
+                        const auto b = shortSample (channel, (first + 1) % shortLength);
+                        const auto expected = a + fraction * (b - a);
+                        samplesCorrect = samplesCorrect && near (output.getSample (channel, frame), expected, 2.0e-5);
+                    }
+                const auto label = juce::String (rate, 0) + " Hz / " + juce::String (speed) + "x";
+                expect (samplesCorrect, label + " wraps short-loop samples and interpolates across the seam");
+                const auto snapshot = processor->getPlaybackSnapshot();
+                expect (snapshot.playing, label + " remains playing across short-loop EOF");
+                expect (near (snapshot.positionSeconds,
+                              std::fmod (27.0 + output.getNumSamples() * increment,
+                                         static_cast<double> (shortLength)) / sourceRate),
+                        label + " wraps position after every source-length crossing");
+            }
+        processor->setPlaybackSpeed (1);
     }
 
     void testFloatSamples()
@@ -656,6 +910,7 @@ private:
         if (now - stressStartedAt >= 1000.0)
         {
             stopStress();
+            processor->setPlaybackSpeed (1);
             callbacks += static_cast<int> (stressCallbacks);
             callbackHeap::allocations += stressAllocations;
             callbackHeap::deallocations += stressDeallocations;
@@ -672,6 +927,8 @@ private:
             lastStressFile = stressEdits % 2 == 0 ? stereoFile : shortFile;
             processor->loadAudioFile (lastStressFile);
             processor->setLooping (stressEdits % 3 != 0);
+            processor->setPlaybackSpeed (Processor::playbackSpeeds[static_cast<std::size_t> (stressEdits)
+                % Processor::playbackSpeeds.size()]);
             processor->seekToSeconds (0.002 * (stressEdits % 10));
             processor->play();
             if (stressEdits % 7 == 0) processor->pause();

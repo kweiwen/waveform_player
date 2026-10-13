@@ -29,7 +29,7 @@ private:
     juce::TooltipWindow tooltips { this, 650 };
 
     juce::TextButton openButton, rewindButton, playButton, pauseButton, stopButton,
-                     forwardButton, loopButton, muteButton;
+                     forwardButton, loopButton, speedButton, muteButton;
     juce::Slider volumeSlider;
     juce::Label titleLabel, subtitleLabel, volumeValueLabel;
     juce::Rectangle<int> volumePanelBounds, volumeOffIconBounds, volumeUpIconBounds;
