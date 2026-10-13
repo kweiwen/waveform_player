@@ -1,5 +1,5 @@
 # Build products, Xcode intermediates and generated build scripts
-build/
+Builds/
 DerivedData/
 TestResults/
 
