@@ -101,6 +101,7 @@ bool WaveformPlayerAudioProcessor::readControls (ControlSnapshot& result) const 
         ControlSnapshot next;
         next.shouldPlay = requestedPlaying.load();
         next.seekSeconds = requestedSeekSeconds.load();
+        next.markerSamples = {{ requestedMarkerA.load(), requestedMarkerB.load() }};
         next.transportRevision = transportCommandRevision.load();
         next.seekRevision = seekCommandRevision.load();
         if (before == controlEpoch.load())
@@ -110,6 +111,20 @@ bool WaveformPlayerAudioProcessor::readControls (ControlSnapshot& result) const 
         }
     }
     return false;
+}
+
+std::pair<juce::int64, juce::int64> WaveformPlayerAudioProcessor::playbackBounds (
+    const std::array<juce::int64, 2>& markers, juce::int64 length) noexcept
+{
+    if (markers[1] >= 0)
+    {
+        // During file replacement a callback may still hold the previous asset.
+        const auto start = juce::jlimit<juce::int64> (0, length, markers[0]);
+        const auto end = juce::jlimit (start, length, markers[1]);
+        if (start < end)
+            return { start, end };
+    }
+    return { 0, length };
 }
 
 const WaveformPlayerAudioProcessor::DecodedAudio*
@@ -155,28 +170,35 @@ void WaveformPlayerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
         audioPlaying = false;
         audioTransportRevision = 0;
         audioSeekRevision = 0;
+        audioMarkers = {{ -1, -1 }};
     }
 
     const auto sourceLength = asset->samples.getNumSamples();
     ControlSnapshot commands;
     if (readControls (commands))
     {
+        audioMarkers = commands.markerSamples;
+        const auto bounds = playbackBounds (audioMarkers, sourceLength);
         if (commands.seekRevision != audioSeekRevision)
         {
             const auto seekSample = std::llround (juce::jlimit (0.0, sourceLength / asset->sampleRate,
                                                               commands.seekSeconds) * asset->sampleRate);
-            sourcePosition = static_cast<double> (juce::jlimit<juce::int64> (0, sourceLength, seekSample));
+            sourcePosition = static_cast<double> (juce::jlimit (bounds.first, bounds.second, seekSample));
             audioSeekRevision = commands.seekRevision;
         }
         if (commands.transportRevision != audioTransportRevision)
         {
             audioPlaying = commands.shouldPlay;
-            if (audioPlaying && sourcePosition >= sourceLength)
-                sourcePosition = 0.0;
+            if (audioPlaying && (sourcePosition < bounds.first || sourcePosition >= bounds.second))
+                sourcePosition = static_cast<double> (bounds.first);
             audioTransportRevision = commands.transportRevision;
         }
     }
 
+    const auto bounds = playbackBounds (audioMarkers, sourceLength);
+    const auto start = static_cast<double> (bounds.first);
+    const auto end = static_cast<double> (bounds.second);
+    const auto rangeLength = end - start;
     const bool muted = isMuted();
     const bool looping = isLooping();
     outputGain.setTargetValue (muted ? 0.0f : juce::Decibels::decibelsToGain (getGainDecibels()));
@@ -197,20 +219,21 @@ void WaveformPlayerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
         const auto smoothedGain = outputGain.getNextValue();
         if (! audioPlaying)
             continue;
-        if (sourcePosition >= sourceLength)
+        if (sourcePosition >= end)
         {
             if (looping)
-                sourcePosition = std::fmod (sourcePosition, static_cast<double> (sourceLength));
+                sourcePosition = start + std::fmod (sourcePosition - start, rangeLength);
             else
             {
                 audioPlaying = false;
-                sourcePosition = 0.0;
+                sourcePosition = start;
                 continue;
             }
         }
 
         const auto first = static_cast<int> (sourcePosition);
-        const auto second = first + 1 < sourceLength ? first + 1 : (looping ? 0 : first);
+        const auto second = first + 1 < bounds.second ? first + 1
+                                                    : (looping ? static_cast<int> (bounds.first) : first);
         // Float WAV samples may use the full finite float range. Double
         // intermediates prevent interpolation, gain and stereo summing from
         // overflowing before the final conversion, while preserving headroom.
@@ -230,14 +253,14 @@ void WaveformPlayerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
             outLeft[sample] = toFiniteFloat (0.5 * (leftSample + rightSample));
         }
         sourcePosition += increment;
-        if (sourcePosition >= sourceLength)
+        if (sourcePosition >= end)
         {
             if (looping)
-                sourcePosition = std::fmod (sourcePosition, static_cast<double> (sourceLength));
+                sourcePosition = start + std::fmod (sourcePosition - start, rangeLength);
             else
             {
                 audioPlaying = false;
-                sourcePosition = 0.0;
+                sourcePosition = start;
             }
         }
     }
@@ -249,13 +272,14 @@ void WaveformPlayerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
 
 void WaveformPlayerAudioProcessor::setTransportCommand (bool shouldPlay, bool resetPosition)
 {
+    const auto start = resetPosition ? getPlaybackSnapshot().rangeStartSeconds : 0.0;
     const std::lock_guard<std::mutex> lock (controlMutex);
     controlEpoch.fetch_add (1);
     requestedPlaying.store (shouldPlay);
     transportCommandRevision.fetch_add (1);
     if (resetPosition)
     {
-        requestedSeekSeconds.store (0.0);
+        requestedSeekSeconds.store (start);
         seekCommandRevision.fetch_add (1);
     }
     controlEpoch.fetch_add (1);
@@ -281,7 +305,7 @@ void WaveformPlayerAudioProcessor::seekToSeconds (double seconds)
     const auto snapshot = getPlaybackSnapshot();
     if (! snapshot.loaded)
         return;
-    const auto clamped = juce::jlimit (0.0, snapshot.durationSeconds, seconds);
+    const auto clamped = juce::jlimit (snapshot.rangeStartSeconds, snapshot.rangeEndSeconds, seconds);
     const auto sourceSample = std::llround (clamped * snapshot.fileSampleRate);
     setSeekCommand (sourceSample / snapshot.fileSampleRate);
 }
@@ -290,6 +314,43 @@ void WaveformPlayerAudioProcessor::skipSeconds (double seconds)
 {
     if (std::isfinite (seconds))
         seekToSeconds (getPlaybackSnapshot().positionSeconds + seconds);
+}
+
+void WaveformPlayerAudioProcessor::addMarker (double seconds)
+{
+    const auto snapshot = getPlaybackSnapshot();
+    if (! std::isfinite (seconds) || ! snapshot.loaded || snapshot.loading || snapshot.choosingFile)
+        return;
+    const auto sample = std::llround (juce::jlimit (0.0, snapshot.durationSeconds, seconds) * snapshot.fileSampleRate);
+    const std::lock_guard<std::mutex> lock (controlMutex);
+    const auto first = requestedMarkerA.load();
+    if (first == sample && requestedMarkerB.load() < 0)
+        return;
+
+    controlEpoch.fetch_add (1);
+    if (first < 0 || requestedMarkerB.load() >= 0)
+    {
+        requestedMarkerA.store (sample);
+        requestedMarkerB.store (-1);
+    }
+    else
+    {
+        const auto start = juce::jmin (first, sample);
+        requestedMarkerA.store (start);
+        requestedMarkerB.store (juce::jmax (first, sample));
+        requestedSeekSeconds.store (start / snapshot.fileSampleRate);
+        seekCommandRevision.fetch_add (1);
+    }
+    controlEpoch.fetch_add (1);
+}
+
+void WaveformPlayerAudioProcessor::clearMarkers()
+{
+    const std::lock_guard<std::mutex> lock (controlMutex);
+    controlEpoch.fetch_add (1);
+    requestedMarkerA.store (-1);
+    requestedMarkerB.store (-1);
+    controlEpoch.fetch_add (1);
 }
 
 void WaveformPlayerAudioProcessor::setLooping (bool shouldLoop)
@@ -353,14 +414,19 @@ WaveformPlayerAudioProcessor::PlaybackSnapshot WaveformPlayerAudioProcessor::get
     result.positionSeconds = reportedPositionSeconds.load (std::memory_order_relaxed);
     result.playing = reportedPlaying.load (std::memory_order_relaxed);
     const std::lock_guard<std::mutex> lock (controlMutex);
+    result.markerSamples = {{ requestedMarkerA.load(), requestedMarkerB.load() }};
+    const auto bounds = playbackBounds (result.markerSamples,
+        std::llround (result.durationSeconds * result.fileSampleRate));
+    result.rangeStartSeconds = bounds.first / result.fileSampleRate;
+    result.rangeEndSeconds = bounds.second / result.fileSampleRate;
     const bool pendingAsset = reportedAssetRevision.load (std::memory_order_relaxed) != result.fileRevision;
     if (pendingAsset || seekCommandRevision.load() != appliedSeekRevision.load (std::memory_order_relaxed))
         result.positionSeconds = requestedSeekSeconds.load();
     if (pendingAsset || transportCommandRevision.load() != appliedTransportRevision.load (std::memory_order_relaxed))
         result.playing = requestedPlaying.load();
-    result.positionSeconds = juce::jlimit (0.0, result.durationSeconds, result.positionSeconds);
+    result.positionSeconds = juce::jlimit (result.rangeStartSeconds, result.rangeEndSeconds, result.positionSeconds);
     if (! result.loading && result.error.isEmpty())
-        result.status = result.playing ? "Playing" : (result.positionSeconds > 0.0 ? "Paused" : "Ready");
+        result.status = result.playing ? "Playing" : (result.positionSeconds != result.rangeStartSeconds ? "Paused" : "Ready");
     return result;
 }
 
@@ -516,6 +582,8 @@ void WaveformPlayerAudioProcessor::publishAudio (std::unique_ptr<DecodedAudio> d
         const std::lock_guard<std::mutex> controlLock (controlMutex);
         controlEpoch.fetch_add (1);
         requestedPlaying.store (false);
+        requestedMarkerA.store (-1);
+        requestedMarkerB.store (-1);
         requestedSeekSeconds.store (decoded != nullptr
             ? juce::jlimit (0.0, nextMetadata.durationSeconds, request.initialPositionSeconds)
             : 0.0);

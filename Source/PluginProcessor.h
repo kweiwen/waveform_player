@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 class WaveformPlayerAudioProcessor : public juce::AudioProcessor
@@ -22,6 +23,9 @@ public:
         double positionSeconds = 0.0;
         double durationSeconds = 0.0;
         double fileSampleRate = 0.0;
+        std::array<juce::int64, 2> markerSamples {{ -1, -1 }};
+        double rangeStartSeconds = 0.0;
+        double rangeEndSeconds = 0.0;
         int playbackSpeed = 1;
         std::uint64_t fileRevision = 0;
         juce::String fileName;
@@ -63,6 +67,8 @@ public:
     void stop();
     void seekToSeconds (double seconds);
     void skipSeconds (double seconds);
+    void addMarker (double seconds);
+    void clearMarkers();
     void setLooping (bool shouldLoop);
     bool isLooping() const noexcept;
     void setGainDecibels (float decibels);
@@ -99,6 +105,7 @@ private:
     {
         bool shouldPlay = false;
         double seekSeconds = 0.0;
+        std::array<juce::int64, 2> markerSamples {{ -1, -1 }};
         std::uint64_t transportRevision = 0;
         std::uint64_t seekRevision = 0;
     };
@@ -113,6 +120,8 @@ private:
     void setTransportCommand (bool shouldPlay, bool resetPosition);
     void setSeekCommand (double seconds);
     bool readControls (ControlSnapshot&) const noexcept;
+    static std::pair<juce::int64, juce::int64> playbackBounds (
+        const std::array<juce::int64, 2>& markers, juce::int64 length) noexcept;
     const DecodedAudio* protectPublishedAudio() noexcept;
     void publishPlaybackState() noexcept;
 
@@ -134,6 +143,7 @@ private:
     std::atomic<std::uint64_t> seekCommandRevision { 0 };
     std::atomic<bool> requestedPlaying { false };
     std::atomic<double> requestedSeekSeconds { 0.0 };
+    std::atomic<juce::int64> requestedMarkerA { -1 }, requestedMarkerB { -1 };
 
     std::mutex requestMutex;
     std::condition_variable requestCondition;
@@ -153,6 +163,7 @@ private:
     // Audio-thread-only playback state, except prepare/release while suspended.
     double outputSampleRate = 44100.0;
     double sourcePosition = 0.0;
+    std::array<juce::int64, 2> audioMarkers {{ -1, -1 }};
     bool audioPlaying = false;
     std::uint64_t audioAssetRevision = 0;
     std::uint64_t audioTransportRevision = 0;

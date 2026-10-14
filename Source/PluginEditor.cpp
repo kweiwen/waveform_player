@@ -226,7 +226,7 @@ public:
     {
         formatManager.registerBasicFormats();
         thumbnail.addChangeListener (this);
-        setTooltip ("Click or drag the waveform to seek. Playback stays playing or paused.");
+        setTooltip ("Left-click or drag to seek. Right-click to set A/B; Shift-right-click to clear.");
         setTitle ("Audio waveform");
         setDescription ("Click or drag to change the playback position");
         fileNameLabel.setFont (interfaceFont (interfaceTypeface, 14.0f));
@@ -266,9 +266,15 @@ public:
             dragging = false;
         duration = snapshot.durationSeconds;
         sampleRate = snapshot.fileSampleRate;
+        const auto markersChanged = markerSamples != snapshot.markerSamples;
+        markerSamples = snapshot.markerSamples;
+        rangeStart = snapshot.rangeStartSeconds;
+        rangeEnd = snapshot.rangeEndSeconds;
         playbackSpeed = snapshot.playbackSpeed;
-        if (! dragging)
+        if (! dragging || markersChanged)
             position = snapshot.positionSeconds;
+        else
+            position = juce::jlimit (rangeStart, rangeEnd, position);
         fileNameLabel.setText (snapshot.loaded ? snapshot.fileName : "No audio file loaded", juce::dontSendNotification);
         const auto filePath = snapshot.loaded ? snapshot.file.getFullPathName() : juce::String();
         fileNameLabel.setTooltip (filePath);
@@ -326,14 +332,47 @@ public:
 
         g.drawHorizontalLine (juce::roundToInt (bounds.getCentreY()), bounds.getX(), bounds.getRight());
 
-        if (loaded && duration > 0.0 && thumbnail.getNumChannels() > 0)
+        if (loaded && duration > 0.0)
         {
-            const auto x = bounds.getX() + static_cast<float> (juce::jlimit (0.0, 1.0, position / duration)) * bounds.getWidth();
-            g.setColour (accent.withAlpha (0.055f));
-            g.fillRect (bounds.withRight (x));
-            g.setColour (accent.withAlpha (loading ? 0.35f : 0.85f));
-            // Only channel 0 is visualised; stereo audio output is unchanged.
-            thumbnail.drawChannel (g, bounds.toNearestInt().reduced (0, 5), 0.0, duration, 0, 0.9f);
+            const auto x = secondsToX (position);
+            if (markerSamples[1] >= 0)
+            {
+                g.setColour (accent.withAlpha (0.12f));
+                g.fillRect (bounds.withLeft (secondsToX (rangeStart)).withRight (secondsToX (rangeEnd)));
+            }
+            else
+            {
+                g.setColour (accent.withAlpha (0.055f));
+                g.fillRect (bounds.withRight (x));
+            }
+
+            if (thumbnail.getNumChannels() > 0)
+            {
+                g.setColour (accent.withAlpha (loading ? 0.35f : 0.85f));
+                // Only channel 0 is visualised; stereo audio output is unchanged.
+                thumbnail.drawChannel (g, bounds.toNearestInt().reduced (0, 5), 0.0, duration, 0, 0.9f);
+            }
+            else
+            {
+                g.setColour (textSecondary);
+                g.setFont (interfaceFont (interfaceTypeface, 14.0f));
+                g.drawFittedText (juce::String::fromUTF8 (thumbnailAvailable ? "Building waveform…" : "Waveform unavailable"),
+                                  bounds.toNearestInt(), juce::Justification::centred, 1);
+            }
+
+            g.setColour (textSecondary.withAlpha (loading ? 0.35f : 0.95f));
+            g.setFont (interfaceFont (interfaceTypeface, 11.0f));
+            for (size_t index = 0; index < markerSamples.size(); ++index)
+            {
+                if (markerSamples[index] < 0 || sampleRate <= 0.0)
+                    continue;
+                const auto markerX = secondsToX (static_cast<double> (markerSamples[index]) / sampleRate);
+                const auto labelX = juce::jlimit (bounds.getX(), bounds.getRight() - 12.0f, markerX + 4.0f);
+                g.drawLine (markerX, bounds.getY(), markerX, bounds.getBottom(), 1.25f);
+                g.drawText (index == 0 ? "A" : "B",
+                            juce::Rectangle<float> { labelX, bounds.getBottom() - 17.0f, 12.0f, 15.0f },
+                            juce::Justification::centredLeft);
+            }
 
             g.setColour (textPrimary.withAlpha (loading ? 0.35f : 0.95f));
             g.drawLine (x, bounds.getY(), x, bounds.getBottom(), 1.5f);
@@ -359,7 +398,7 @@ public:
         auto footer = getLocalBounds().reduced (16, 0).removeFromBottom (25);
         g.setFont (interfaceFont (interfaceTypeface, 11.0f));
         g.setColour (textSecondary);
-        g.drawText (juce::String::fromUTF8 (loaded ? "Click or drag to seek" : "WAV · MP3 · FLAC"), footer.removeFromLeft (220),
+        g.drawText (juce::String::fromUTF8 (loaded ? "Right-click: A/B · Shift-right-click: clear" : "WAV · MP3 · FLAC"), footer,
                     juce::Justification::centredLeft);
     }
 
@@ -367,8 +406,26 @@ public:
     {
         if (loaded && ! loading && ! choosingFile && duration > 0.0 && getPlotBounds().contains (event.position))
         {
-            dragging = true;
-            seek (event.position.x);
+            if (event.mods.isRightButtonDown())
+            {
+                dragging = false;
+                if (event.mods.isShiftDown())
+                {
+                    if (onClearMarkers)
+                        onClearMarkers();
+                }
+                else if (onAddMarker)
+                {
+                    onAddMarker (xToSeconds (event.position.x));
+                }
+                repaint();
+                return;
+            }
+            if (event.mods.isLeftButtonDown())
+            {
+                dragging = true;
+                seek (event.position.x);
+            }
         }
     }
 
@@ -381,6 +438,8 @@ public:
     void mouseUp (const juce::MouseEvent&) override { dragging = false; }
 
     std::function<void (double)> onSeek;
+    std::function<void (double)> onAddMarker;
+    std::function<void()> onClearMarkers;
 
 private:
     juce::Rectangle<float> getPlotBounds() const
@@ -388,10 +447,22 @@ private:
         return getLocalBounds().reduced (16, 0).withTrimmedTop (52).withTrimmedBottom (25).toFloat();
     }
 
-    void seek (float x)
+    float secondsToX (double seconds) const
     {
         const auto bounds = getPlotBounds();
-        position = duration * juce::jlimit (0.0, 1.0, static_cast<double> ((x - bounds.getX()) / bounds.getWidth()));
+        const auto fraction = duration > 0.0 ? juce::jlimit (0.0, 1.0, seconds / duration) : 0.0;
+        return bounds.getX() + static_cast<float> (fraction) * bounds.getWidth();
+    }
+
+    double xToSeconds (float x) const
+    {
+        const auto bounds = getPlotBounds();
+        return duration * juce::jlimit (0.0, 1.0, static_cast<double> ((x - bounds.getX()) / bounds.getWidth()));
+    }
+
+    void seek (float x)
+    {
+        position = juce::jlimit (rangeStart, rangeEnd, xToSeconds (x));
         if (onSeek)
             onSeek (position);
         repaint();
@@ -410,6 +481,8 @@ private:
     bool loaded = false, loading = false, choosingFile = false, dragging = false, thumbnailAvailable = false;
     int playbackSpeed = 1;
     double position = 0.0, duration = 0.0, sampleRate = 0.0;
+    double rangeStart = 0.0, rangeEnd = 0.0;
+    std::array<juce::int64, 2> markerSamples {{ -1, -1 }};
 };
 
 WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (WaveformPlayerAudioProcessor& processor)
@@ -483,6 +556,8 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
         updateFromProcessor();
     };
     waveform->onSeek = [this] (double seconds) { audioProcessor.seekToSeconds (seconds); };
+    waveform->onAddMarker = [this] (double seconds) { audioProcessor.addMarker (seconds); updateFromProcessor(); };
+    waveform->onClearMarkers = [this] { audioProcessor.clearMarkers(); updateFromProcessor(); };
     addAndMakeVisible (*waveform);
 
     volumeSlider.setSliderStyle (juce::Slider::LinearHorizontal);
@@ -586,11 +661,11 @@ void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
     openButton.setToggleState (snapshot.choosingFile, juce::dontSendNotification);
     openButton.setEnabled (! snapshot.loading && ! snapshot.choosingFile);
     speedButton.setEnabled (! snapshot.choosingFile);
-    rewindButton.setEnabled (available && snapshot.positionSeconds > 0.0);
+    rewindButton.setEnabled (available && snapshot.positionSeconds > snapshot.rangeStartSeconds);
     playButton.setEnabled (available && ! snapshot.playing);
     pauseButton.setEnabled (available && snapshot.playing);
-    stopButton.setEnabled (available && (snapshot.playing || snapshot.positionSeconds > 0.0));
-    forwardButton.setEnabled (available && snapshot.positionSeconds < snapshot.durationSeconds);
+    stopButton.setEnabled (available && (snapshot.playing || snapshot.positionSeconds > snapshot.rangeStartSeconds));
+    forwardButton.setEnabled (available && snapshot.positionSeconds < snapshot.rangeEndSeconds);
     loopButton.setEnabled (available);
     volumeSlider.setEnabled (available && ! muted);
     muteButton.setEnabled (available);
@@ -607,7 +682,9 @@ void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
     loopButton.setToggleState (looping, juce::dontSendNotification);
     loopButton.setButtonText (looping ? "Loop On" : "Loop Off");
     loopButton.setName (loopButton.getButtonText());
-    loopButton.setTooltip (looping ? "Loop On: repeat the whole audio file" : "Loop Off: stop and return to the start at the end");
+    const auto hasPair = snapshot.markerSamples[1] >= 0;
+    loopButton.setTooltip (looping ? hasPair ? "Loop On: repeat the A/B range" : "Loop On: repeat the whole audio file"
+                                  : hasPair ? "Loop Off: stop and return to A at B" : "Loop Off: stop and return to the start at the end");
     loopButton.setDescription (loopButton.getTooltip());
     muteButton.setToggleState (muted, juce::dontSendNotification);
     muteButton.setName (muted ? "Unmute output" : "Mute output");

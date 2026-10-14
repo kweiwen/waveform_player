@@ -129,6 +129,9 @@ public:
         addScreenshot ("WaveformPlayer-empty.png", 0, 0);
         addLoad (stereoFile);
         addAction ("WAV metadata and transport", [this] { testTransport(); });
+        addAction ("A/B marker lifecycle", [this] { testMarkers(); });
+        addAction ("A/B transport bounds", [this] { testMarkerTransport(); });
+        addMarkerEditorTests();
         addFileChooserTests();
         addScreenshot ("WaveformPlayer-ui.png", 0, 0, true);
         addScreenshot ("WaveformPlayer-fixed-size.png", 700, 400);
@@ -158,6 +161,7 @@ public:
         addLoad (shortFile);
         addAction ("EOF and looping", [this] { testEndAndLooping(); });
         addAction ("speed EOF and looping", [this] { testSpeedEndAndLooping(); });
+        addAction ("A/B audio boundaries", [this] { testMarkerAudio(); });
         addLoad (flacFile);
         addAction ("FLAC decoding", [this]
         {
@@ -503,6 +507,8 @@ private:
                     "Folder starts closed and enabled");
             configure (*processor, sourceRate, 2);
             processor->seekToSeconds (2.0);
+            processor->addMarker (2.0);
+            processor->addMarker (9.0);
             processor->play();
             render (*processor, 64);
             beforeChooser = processor->getPlaybackSnapshot();
@@ -513,6 +519,8 @@ private:
             expect (snapshot.file == beforeChooser.file && snapshot.fileRevision == beforeChooser.fileRevision
                     && snapshot.playing && near (snapshot.positionSeconds, beforeChooser.positionSeconds),
                     "opening the chooser preserves the current audio and transport");
+            expect (snapshot.markerSamples == beforeChooser.markerSamples,
+                    "opening the chooser preserves A/B markers");
             auto* modals = juce::ModalComponentManager::getInstance();
             auto* firstDialog = modals->getModalComponent (0);
             expect (firstDialog != nullptr && modals->getNumModalComponents() == 1, "one chooser dialog opens");
@@ -540,6 +548,9 @@ private:
                           beforeChooser.positionSeconds + 128.0 / sourceRate),
                     "playback continues advancing while choosing a file");
             beforeChooser = processor->getPlaybackSnapshot();
+            processor->addMarker (4.0);
+            expect (processor->getPlaybackSnapshot().markerSamples == beforeChooser.markerSamples,
+                    "marker requests cannot change markers while the chooser is open");
             dismissChooser();
         });
         addWait ("cancelled chooser closes Folder", [this]
@@ -556,6 +567,8 @@ private:
                     "chooser cancellation preserves the loaded file without a load request");
             expect (snapshot.playing == beforeChooser.playing && near (snapshot.positionSeconds, beforeChooser.positionSeconds),
                     "chooser cancellation preserves playback state and position");
+            expect (snapshot.markerSamples == beforeChooser.markerSamples,
+                    "chooser cancellation preserves A/B markers");
             processor->chooseAudioFile (false);
         });
         addWait ("Folder reopens for valid selection", [this]
@@ -576,7 +589,12 @@ private:
                     "chooser selection loads the chosen audio through the real callback");
             expect (! snapshot.playing && near (snapshot.positionSeconds, 0.0),
                     "successful chooser selection stops and resets playback");
+            expect (snapshot.markerSamples[0] == -1 && snapshot.markerSamples[1] == -1
+                    && near (snapshot.rangeStartSeconds, 0.0) && near (snapshot.rangeEndSeconds, 12.0),
+                    "successful reload of the same file clears markers and restores full-file bounds");
             processor->seekToSeconds (3.0);
+            processor->addMarker (3.0);
+            processor->addMarker (9.0);
             processor->play();
             render (*processor, 64);
             beforeChooser = processor->getPlaybackSnapshot();
@@ -601,6 +619,11 @@ private:
                     "invalid chooser selection preserves the previous file and duration");
             expect (snapshot.playing == beforeChooser.playing && near (snapshot.positionSeconds, beforeChooser.positionSeconds),
                     "invalid chooser selection preserves playback state and position");
+            expect (snapshot.markerSamples == beforeChooser.markerSamples
+                    && near (snapshot.rangeStartSeconds, beforeChooser.rangeStartSeconds)
+                    && near (snapshot.rangeEndSeconds, beforeChooser.rangeEndSeconds),
+                    "invalid chooser selection preserves A/B markers and bounds");
+            resetMarkerTestState();
             editor.reset();
         });
         addLoad (stereoFile);
@@ -923,6 +946,295 @@ private:
         }
     }
 
+    void resetMarkerTestState()
+    {
+        processor->pause();
+        processor->clearMarkers();
+        processor->setPlaybackSpeed (1);
+        processor->setLooping (false);
+        processor->setGainDecibels (0.0f);
+        processor->setMuted (false);
+        processor->seekToSeconds (0.0);
+        render (*processor, 1);
+    }
+
+    void setMarkers (double first, double second)
+    {
+        processor->pause();
+        processor->clearMarkers();
+        processor->addMarker (first);
+        processor->addMarker (second);
+        render (*processor, 1);
+    }
+
+    void testMarkers()
+    {
+        resetMarkerTestState();
+        configure (*processor, sourceRate, 2);
+        processor->seekToSeconds (6.0);
+        processor->addMarker (2.0);
+        auto snapshot = processor->getPlaybackSnapshot();
+        expect (snapshot.markerSamples[0] == 96000 && snapshot.markerSamples[1] == -1
+                && near (snapshot.rangeStartSeconds, 0.0) && near (snapshot.rangeEndSeconds, 12.0),
+                "first marker retains full-file playback bounds");
+        expect (! snapshot.playing && near (snapshot.positionSeconds, 6.0),
+                "first marker uses its explicit time and preserves a different paused position");
+        processor->addMarker (96000.49 / sourceRate);
+        expect (processor->getPlaybackSnapshot().markerSamples == snapshot.markerSamples
+                && near (processor->getPlaybackSnapshot().positionSeconds, 6.0),
+                "same source sample ignores a duplicate marker");
+        processor->addMarker (9.0);
+        snapshot = processor->getPlaybackSnapshot();
+        expect (snapshot.markerSamples[0] == 96000 && snapshot.markerSamples[1] == 432000
+                && near (snapshot.rangeStartSeconds, 2.0) && near (snapshot.rangeEndSeconds, 9.0)
+                && ! snapshot.playing && near (snapshot.positionSeconds, 2.0),
+                "forward second marker establishes A/B and returns paused position to A");
+        processor->seekToSeconds (6.0);
+        expect (processor->getPlaybackSnapshot().markerSamples == snapshot.markerSamples,
+                "ordinary seek leaves fixed markers in place");
+        processor->addMarker (11.0);
+        snapshot = processor->getPlaybackSnapshot();
+        expect (snapshot.markerSamples[0] == 528000 && snapshot.markerSamples[1] == -1
+                && ! snapshot.playing && near (snapshot.positionSeconds, 6.0)
+                && near (snapshot.rangeStartSeconds, 0.0) && near (snapshot.rangeEndSeconds, 12.0),
+                "third marker may start outside the old range without moving paused position");
+
+        processor->clearMarkers();
+        processor->seekToSeconds (8.0);
+        processor->play();
+        render (*processor, 16);
+        processor->addMarker (7.0);
+        expect (processor->getPlaybackSnapshot().markerSamples[0] == 336000
+                && near (processor->getPlaybackSnapshot().positionSeconds, 384016.0 / sourceRate),
+                "explicit first marker preserves the latest audio callback position during playback");
+        processor->addMarker (3.0);
+        snapshot = processor->getPlaybackSnapshot();
+        expect (snapshot.markerSamples[0] == 144000 && snapshot.markerSamples[1] == 336000
+                && snapshot.playing && near (snapshot.positionSeconds, 3.0),
+                "reverse second marker sorts A/B and returns playing position to A");
+        expect (near (render (*processor, 1).getSample (0, 0), stereoSample (0, 144000), 2.0e-5),
+                "playing marker pair resumes audio at A");
+        processor->seekToSeconds (5.0);
+        render (*processor, 8);
+        processor->addMarker (11.0);
+        snapshot = processor->getPlaybackSnapshot();
+        expect (snapshot.markerSamples[0] == 528000 && snapshot.markerSamples[1] == -1
+                && snapshot.playing && near (snapshot.positionSeconds, 240008.0 / sourceRate),
+                "third marker preserves the latest playing position");
+        processor->clearMarkers();
+        auto cleared = processor->getPlaybackSnapshot();
+        expect (cleared.markerSamples[0] == -1 && cleared.markerSamples[1] == -1
+                && cleared.playing && near (cleared.positionSeconds, snapshot.positionSeconds),
+                "clear preserves playing state and position");
+        setMarkers (2.0, 9.0);
+        processor->seekToSeconds (6.0);
+        processor->clearMarkers();
+        cleared = processor->getPlaybackSnapshot();
+        expect (! cleared.playing && near (cleared.positionSeconds, 6.0)
+                && near (cleared.rangeStartSeconds, 0.0) && near (cleared.rangeEndSeconds, 12.0),
+                "clear restores full bounds without moving paused position");
+        resetMarkerTestState();
+    }
+
+    void testMarkerTransport()
+    {
+        resetMarkerTestState();
+        setMarkers (2.0, 9.0);
+        processor->seekToSeconds (-100.0);
+        render (*processor, 1);
+        expect (near (processor->getPlaybackSnapshot().positionSeconds, 2.0), "A/B seek clamps at A");
+        processor->seekToSeconds (100.0);
+        render (*processor, 1);
+        expect (! processor->getPlaybackSnapshot().playing
+                && near (processor->getPlaybackSnapshot().positionSeconds, 9.0), "paused A/B seek may stop at B");
+        processor->seekToSeconds (8.0);
+        processor->skipSeconds (-5.0);
+        render (*processor, 1);
+        expect (near (processor->getPlaybackSnapshot().positionSeconds, 3.0), "A/B Rewind keeps the five-second step");
+        processor->skipSeconds (-5.0);
+        render (*processor, 1);
+        expect (near (processor->getPlaybackSnapshot().positionSeconds, 2.0), "A/B Rewind clamps at A");
+        processor->skipSeconds (5.0);
+        render (*processor, 1);
+        expect (near (processor->getPlaybackSnapshot().positionSeconds, 7.0), "A/B Fast Forward keeps the five-second step");
+        processor->skipSeconds (5.0);
+        render (*processor, 1);
+        expect (near (processor->getPlaybackSnapshot().positionSeconds, 9.0), "A/B Fast Forward clamps at B");
+        processor->play();
+        const auto output = render (*processor, 64);
+        expect (near (output.getSample (0, 0), stereoSample (0, 96000), 2.0e-5), "Play from B restarts at A");
+        processor->pause();
+        const auto paused = processor->getPlaybackSnapshot();
+        expect (silent (render (*processor, 64))
+                && near (processor->getPlaybackSnapshot().positionSeconds, paused.positionSeconds)
+                && processor->getPlaybackSnapshot().markerSamples == paused.markerSamples,
+                "A/B Pause preserves position and markers while rendering silence");
+        processor->stop();
+        expect (silent (render (*processor, 1)) && near (processor->getPlaybackSnapshot().positionSeconds, 2.0),
+                "A/B Stop returns to A and emits silence");
+        processor->play();
+        render (*processor, 1);
+        processor->seekToSeconds (9.0);
+        expect (silent (render (*processor, 4)) && ! processor->getPlaybackSnapshot().playing
+                && near (processor->getPlaybackSnapshot().positionSeconds, 2.0),
+                "playing seek to B with Loop Off stops at A without out-of-range output");
+        processor->setLooping (true);
+        processor->play();
+        render (*processor, 1);
+        processor->seekToSeconds (9.0);
+        expect (near (render (*processor, 1).getSample (0, 0), stereoSample (0, 96000), 2.0e-5)
+                && processor->getPlaybackSnapshot().playing,
+                "playing seek to B with Loop On resumes at A");
+        resetMarkerTestState();
+    }
+
+    juce::Component* waveformComponent() const
+    {
+        if (editor != nullptr)
+            for (int child = 0; child < editor->getNumChildComponents(); ++child)
+                if (editor->getChildComponent (child)->getTitle() == "Audio waveform")
+                    return editor->getChildComponent (child);
+        return nullptr;
+    }
+
+    static juce::Point<float> waveformPointAt (juce::Component& waveform, double seconds)
+    {
+        const auto plot = waveform.getLocalBounds().reduced (16, 0).withTrimmedTop (52).withTrimmedBottom (25).toFloat();
+        return { plot.getX() + plot.getWidth() * static_cast<float> (seconds / 12.0), plot.getCentreY() };
+    }
+
+    static juce::MouseEvent mouseEvent (juce::Component& target, juce::Point<float> position,
+                                       bool shift = false, bool rightButton = false)
+    {
+        const auto now = juce::Time::getCurrentTime();
+        return { juce::Desktop::getInstance().getMainMouseSource(), position,
+                 juce::ModifierKeys ((rightButton ? juce::ModifierKeys::rightButtonModifier
+                                                 : juce::ModifierKeys::leftButtonModifier)
+                                    | (shift ? juce::ModifierKeys::shiftModifier : 0)),
+                 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, &target, &target, now, position, now, 1, false };
+    }
+
+    void addMarkerEditorTests()
+    {
+        addAction ("right-click editor marker workflow", [this]
+        {
+            resetMarkerTestState();
+            editor.reset (processor->createEditor());
+            auto* waveform = waveformComponent();
+            expect (waveform != nullptr, "editor exposes the waveform component for marker clicks");
+            if (waveform == nullptr) return;
+            const auto clickAt = [waveform] (double seconds, bool shift = false)
+            {
+                const auto event = mouseEvent (*waveform, waveformPointAt (*waveform, seconds), shift, true);
+                waveform->mouseDown (event);
+                waveform->mouseUp (event);
+            };
+            processor->seekToSeconds (6.0);
+            waveform->mouseDown (mouseEvent (*waveform, waveformPointAt (*waveform, 9.0), false, true));
+            waveform->mouseDrag (mouseEvent (*waveform, waveformPointAt (*waveform, 8.0), false, true));
+            waveform->mouseUp (mouseEvent (*waveform, waveformPointAt (*waveform, 8.0), false, true));
+            auto snapshot = processor->getPlaybackSnapshot();
+            expect (snapshot.markerSamples[0] == 432000 && snapshot.markerSamples[1] == -1
+                    && ! snapshot.playing && near (snapshot.positionSeconds, 6.0),
+                    "first right-click uses its point without seeking, including its following right drag");
+            clickAt (9.0);
+            expect (processor->getPlaybackSnapshot().markerSamples == snapshot.markerSamples
+                    && near (processor->getPlaybackSnapshot().positionSeconds, 6.0),
+                    "right-click at the same source sample ignores a duplicate marker");
+            clickAt (2.0);
+            snapshot = processor->getPlaybackSnapshot();
+            expect (snapshot.markerSamples[0] == 96000 && snapshot.markerSamples[1] == 432000
+                    && ! snapshot.playing && near (snapshot.positionSeconds, 2.0),
+                    "reverse second right-click sorts A/B and returns paused position to A");
+            waveform->mouseDown (mouseEvent (*waveform, waveformPointAt (*waveform, 11.0), false, true));
+            waveform->mouseDrag (mouseEvent (*waveform, waveformPointAt (*waveform, 1.0), false, true));
+            waveform->mouseUp (mouseEvent (*waveform, waveformPointAt (*waveform, 1.0), false, true));
+            snapshot = processor->getPlaybackSnapshot();
+            expect (snapshot.markerSamples[0] == 528000 && snapshot.markerSamples[1] == -1
+                    && near (snapshot.positionSeconds, 2.0) && near (snapshot.rangeStartSeconds, 0.0)
+                    && near (snapshot.rangeEndSeconds, 12.0),
+                    "third right-click uses a point outside the old A/B range without seeking or starting a drag");
+            clickAt (6.0, true);
+            expect (processor->getPlaybackSnapshot().markerSamples[0] == -1
+                    && near (processor->getPlaybackSnapshot().positionSeconds, 2.0),
+                    "Shift-right-click at blank space clears a single marker without seeking");
+            clickAt (2.0);
+            clickAt (9.0);
+            snapshot = processor->getPlaybackSnapshot();
+            expect (! editor->keyPressed (juce::KeyPress ('m'))
+                    && processor->getPlaybackSnapshot().markerSamples == snapshot.markerSamples
+                    && near (processor->getPlaybackSnapshot().positionSeconds, snapshot.positionSeconds),
+                    "M is unhandled and leaves A/B and the playhead unchanged");
+            screenshotReadyAt = juce::Time::getMillisecondCounterHiRes() + 150.0;
+        });
+        addWait ("A/B Ready UI refresh", [this] { return juce::Time::getMillisecondCounterHiRes() >= screenshotReadyAt; });
+        addAction ("A/B Ready and editor reopen", [this]
+        {
+            auto* rewind = editor->findChildWithID ("rewind");
+            auto* stop = editor->findChildWithID ("stop");
+            expect (rewind != nullptr && stop != nullptr && ! rewind->isEnabled() && ! stop->isEnabled()
+                    && processor->getPlaybackSnapshot().status == "Ready", "paused A has Ready UI with Rewind and Stop disabled");
+            const auto markers = processor->getPlaybackSnapshot().markerSamples;
+            editor.reset();
+            editor.reset (processor->createEditor());
+            expect (processor->getPlaybackSnapshot().markerSamples == markers, "closing and reopening editor preserves A/B");
+            processor->seekToSeconds (9.0);
+            render (*processor, 1);
+            screenshotReadyAt = juce::Time::getMillisecondCounterHiRes() + 150.0;
+        });
+        addWait ("A/B endpoint UI refresh", [this] { return juce::Time::getMillisecondCounterHiRes() >= screenshotReadyAt; });
+        addAction ("A/B endpoint controls", [this]
+        {
+            auto* forward = editor->findChildWithID ("forward");
+            auto* stop = editor->findChildWithID ("stop");
+            expect (forward != nullptr && stop != nullptr && ! forward->isEnabled() && stop->isEnabled()
+                    && processor->getPlaybackSnapshot().status == "Paused", "paused B has Paused UI with Fast Forward disabled");
+            processor->seekToSeconds (6.0);
+            render (*processor, 1);
+            editor->createComponentSnapshot (editor->getLocalBounds());
+            screenshotReadyAt = juce::Time::getMillisecondCounterHiRes() + 4500.0;
+        });
+        addWait ("A/B waveform screenshot refresh", [this] { return juce::Time::getMillisecondCounterHiRes() >= screenshotReadyAt; });
+        addAction ("A/B waveform mouse gestures", [this]
+        {
+            captureEditor ("WaveformPlayer-ab-range.png");
+            auto* waveform = waveformComponent();
+            expect (waveform != nullptr, "editor exposes the waveform component for mouse gestures");
+            if (waveform != nullptr)
+            {
+                const auto pointAt = [waveform] (double seconds) { return waveformPointAt (*waveform, seconds); };
+                const auto markers = processor->getPlaybackSnapshot().markerSamples;
+                waveform->mouseDown (mouseEvent (*waveform, pointAt (2.0)));
+                expect (near (processor->getPlaybackSnapshot().positionSeconds, 2.0), "ordinary marker click still seeks");
+                waveform->mouseDrag (mouseEvent (*waveform, pointAt (7.0)));
+                waveform->mouseUp (mouseEvent (*waveform, pointAt (7.0)));
+                expect (near (processor->getPlaybackSnapshot().positionSeconds, 7.0, 1.0 / sourceRate)
+                        && processor->getPlaybackSnapshot().markerSamples == markers, "ordinary waveform drag seeks without moving A/B");
+                waveform->mouseDown (mouseEvent (*waveform, pointAt (9.0), true));
+                waveform->mouseUp (mouseEvent (*waveform, pointAt (9.0), true));
+                expect (near (processor->getPlaybackSnapshot().positionSeconds, 9.0)
+                        && processor->getPlaybackSnapshot().markerSamples == markers,
+                        "Shift-left-click on a marker tick seeks without clearing A/B");
+                waveform->mouseDown (mouseEvent (*waveform, pointAt (6.0), true));
+                waveform->mouseUp (mouseEvent (*waveform, pointAt (6.0), true));
+                expect (near (processor->getPlaybackSnapshot().positionSeconds, 6.0, 1.0 / sourceRate), "Shift on waveform blank space still seeks");
+                processor->play();
+                render (*processor, 8);
+                const auto beforeClear = processor->getPlaybackSnapshot();
+                waveform->mouseDown (mouseEvent (*waveform, pointAt (4.0), true, true));
+                waveform->mouseDrag (mouseEvent (*waveform, pointAt (11.0), true, true));
+                waveform->mouseUp (mouseEvent (*waveform, pointAt (11.0), true, true));
+                const auto cleared = processor->getPlaybackSnapshot();
+                expect (cleared.markerSamples[0] == -1 && cleared.markerSamples[1] == -1
+                        && cleared.playing && near (cleared.positionSeconds, beforeClear.positionSeconds),
+                        "Shift-right-click at blank space clears A/B without seeking, including its following right drag");
+            }
+            captureEditor ("WaveformPlayer-ab-cleared.png");
+            resetMarkerTestState();
+            editor.reset();
+        });
+    }
+
     void testTransport()
     {
         configure (*processor, sourceRate, 2);
@@ -1213,6 +1525,72 @@ private:
                         label + " wraps position after every source-length crossing");
             }
         processor->setPlaybackSpeed (1);
+    }
+
+    void testMarkerAudio()
+    {
+        resetMarkerTestState();
+        // Interior samples make a read at B or a wrap to file origin audible.
+        // The five-sample range also forces 8x / 8 kHz to cross many loops per
+        // host sample, while 96 kHz visits the half-sample interpolation seam.
+        constexpr int firstMarker = 5, secondMarker = 10, rangeLength = secondMarker - firstMarker;
+        struct Case { double rate; int speed; };
+        for (const auto testCase : { Case { 8000.0, 8 }, Case { 44100.0, 8 }, Case { 96000.0, 1 } })
+            for (const auto looping : { false, true })
+            {
+                configure (*processor, testCase.rate, 2);
+                setMarkers (firstMarker / sourceRate, secondMarker / sourceRate);
+                processor->setLooping (looping);
+                processor->setPlaybackSpeed (testCase.speed);
+                processor->seekToSeconds ((secondMarker - 1) / sourceRate);
+                processor->play();
+                const auto output = render (*processor, 64);
+                const auto increment = sourceRate * testCase.speed / testCase.rate;
+                bool samplesCorrect = true;
+                for (int channel = 0; channel < 2; ++channel)
+                    for (int frame = 0; frame < output.getNumSamples(); ++frame)
+                    {
+                        auto sourceFrame = secondMarker - 1.0 + frame * increment;
+                        if (looping)
+                            sourceFrame = firstMarker + std::fmod (sourceFrame - firstMarker, static_cast<double> (rangeLength));
+                        double expected = 0.0;
+                        if (sourceFrame < secondMarker)
+                        {
+                            const auto first = static_cast<int> (sourceFrame);
+                            const auto second = first + 1 < secondMarker ? first + 1 : looping ? firstMarker : first;
+                            const auto fraction = sourceFrame - first;
+                            const auto a = shortSample (channel, first);
+                            expected = a + fraction * (shortSample (channel, second) - a);
+                        }
+                        samplesCorrect = samplesCorrect && near (output.getSample (channel, frame), expected, 2.0e-5);
+                    }
+                const auto label = "A/B " + juce::String (testCase.rate, 0) + " Hz / " + juce::String (testCase.speed)
+                    + "x / Loop " + (looping ? "On" : "Off");
+                expect (samplesCorrect, label + " renders only legal range samples and interpolates at B correctly");
+                const auto snapshot = processor->getPlaybackSnapshot();
+                const auto expectedPosition = looping
+                    ? firstMarker + std::fmod (rangeLength - 1.0 + output.getNumSamples() * increment, static_cast<double> (rangeLength))
+                    : static_cast<double> (firstMarker);
+                expect (snapshot.playing == looping && near (snapshot.positionSeconds, expectedPosition / sourceRate),
+                        label + " preserves multi-loop overshoot or stops at A");
+                if (! looping)
+                    expect (silent (render (*processor, 16)), label + " stays silent after reaching B");
+            }
+
+        configure (*processor, 44100.0, 2);
+        setMarkers (15.0 / sourceRate, 16.0 / sourceRate);
+        processor->setPlaybackSpeed (8);
+        processor->setLooping (true);
+        processor->play();
+        const auto oneSampleLoop = render (*processor, 16);
+        bool oneSampleCorrect = true;
+        for (int channel = 0; channel < 2; ++channel)
+            for (int frame = 0; frame < oneSampleLoop.getNumSamples(); ++frame)
+                oneSampleCorrect = oneSampleCorrect
+                    && near (oneSampleLoop.getSample (channel, frame), shortSample (channel, 15), 2.0e-5);
+        expect (oneSampleCorrect && processor->getPlaybackSnapshot().playing,
+                "one-source-sample A/B range loops safely at high speed and a different host rate");
+        resetMarkerTestState();
     }
 
     void testFloatSamples()
