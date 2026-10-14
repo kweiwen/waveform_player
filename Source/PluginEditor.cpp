@@ -101,9 +101,10 @@ public:
 
     void drawButtonText (juce::Graphics& g, juce::TextButton& button, bool highlighted, bool down) override
     {
-        const auto highlightedOrActive = highlighted || button.getToggleState() || button.hasKeyboardFocus (true);
-        const auto opacity = button.isEnabled() ? highlightedOrActive ? 1.0f : 0.85f : 0.25f;
         const auto isMuteButton = button.getComponentID() == "mute";
+        const auto highlightedOrActive = highlighted || button.hasKeyboardFocus (true)
+                                      || (button.getToggleState() && ! isMuteButton);
+        const auto opacity = button.isEnabled() ? highlightedOrActive ? 1.0f : 0.85f : 0.25f;
         const auto isFolderButton = button.getComponentID() == "open";
         const auto iconId = isMuteButton ? juce::String (button.getToggleState() ? "volume-mute" : "volume-up")
                          : isFolderButton ? juce::String (button.getToggleState() ? "folder-open" : "open")
@@ -117,15 +118,10 @@ public:
                 const auto centreY = static_cast<float> (button.getHeight()) * 0.5f + (down ? 1.0f : 0.0f);
                 const auto size = static_cast<float> (svgCanvasSize);
                 drawSvgIcon (g, *drawable, { centreX - size * 0.5f, centreY - size * 0.5f, size, size }, opacity);
-                if (button.getToggleState() && ! isMuteButton && ! isFolderButton)
+                if (button.getComponentID() == "loop" && button.getToggleState())
                 {
                     g.setColour (textPrimary.withAlpha (opacity));
                     g.fillEllipse (centreX - 1.5f, static_cast<float> (button.getHeight()) - 4.0f, 3.0f, 3.0f);
-                }
-                else if (button.hasKeyboardFocus (true))
-                {
-                    g.setColour (textSecondary);
-                    g.drawHorizontalLine (button.getHeight() - 3, centreX - 10.0f, centreX + 10.0f);
                 }
                 return;
             }
@@ -134,12 +130,6 @@ public:
         g.setFont (interfaceFont (interfaceTypeface, 12.0f));
         g.drawFittedText (button.getButtonText(), button.getLocalBounds().reduced (8, 0),
                           juce::Justification::centred, 1);
-        if (button.getToggleState() || button.hasKeyboardFocus (true))
-        {
-            const auto centreX = static_cast<float> (button.getWidth()) * 0.5f;
-            g.setColour (textPrimary.withMultipliedAlpha (opacity));
-            g.drawHorizontalLine (button.getHeight() - 4, centreX - 10.0f, centreX + 10.0f);
-        }
     }
 
     juce::Rectangle<int> getTooltipBounds (const juce::String& text, juce::Point<int> screenPosition,
@@ -198,8 +188,7 @@ private:
         icon.id = id;
         icon.normal = drawable->createCopy();
         icon.active = drawable->createCopy();
-        icon.normal->replaceColour (juce::Colours::black, id == "loop" || id.startsWith ("volume-")
-                                                          ? textSecondary : textPrimary);
+        icon.normal->replaceColour (juce::Colours::black, id == "loop" ? textSecondary : textPrimary);
         icon.active->replaceColour (juce::Colours::black, textPrimary);
     }
 
