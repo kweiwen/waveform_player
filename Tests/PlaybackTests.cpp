@@ -1,5 +1,6 @@
 #define JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP 1
 #include "../Source/PluginProcessor.h"
+#include "../Source/VideoFrameView.h"
 
 #include <atomic>
 #include <cmath>
@@ -84,8 +85,10 @@ public:
 
     void initialise (const juce::String&) override
     {
-        fixtureDirectory = juce::File::getSpecialLocation (juce::File::tempDirectory)
-            .getNonexistentChildFile ("WaveformPlayer-playback-tests", {}, false);
+        const auto resultsPath = juce::SystemStats::getEnvironmentVariable ("WAVEFORM_PLAYER_TEST_RESULTS", {});
+        const auto fixtureParent = resultsPath.isNotEmpty()
+            ? juce::File (resultsPath) : juce::File::getSpecialLocation (juce::File::tempDirectory);
+        fixtureDirectory = fixtureParent.getNonexistentChildFile ("WaveformPlayer-playback-tests", {}, false);
         if (! fixtureDirectory.createDirectory())
         {
             expect (false, "create temporary fixture directory");
@@ -98,6 +101,11 @@ public:
         shortFile = fixtureDirectory.getChildFile ("short-loop.wav");
         flacFile = fixtureDirectory.getChildFile ("mono-constant.flac");
         mp3File = fixtureDirectory.getChildFile ("stereo-tone.mp3");
+        mp4File = fixtureDirectory.getChildFile ("stereo-video.mp4");
+        movFile = fixtureDirectory.getChildFile ("stereo-video.mov");
+        monoVideoFile = fixtureDirectory.getChildFile ("mono-video.mp4");
+        silentVideoFile = fixtureDirectory.getChildFile ("video-without-audio.mp4");
+        gopVideoFile = fixtureDirectory.getChildFile ("long-gop.mp4");
         floatFile = fixtureDirectory.getChildFile ("float-extremes.wav");
         invalidFile = fixtureDirectory.getChildFile ("invalid.wav");
         invalidFile.replaceWithText ("This is deliberately not an audio file.");
@@ -113,6 +121,42 @@ public:
             && encoder.waitForProcessToFinish (10000) && encoder.getExitCode() == 0;
         expect (encoded && mp3File.existsAsFile(), "encode synthetic MP3 fixture with ffmpeg");
         if (! encoded) std::cerr << encoder.readAllProcessOutput() << '\n';
+        for (const auto& videoFile : { mp4File, movFile })
+        {
+            juce::ChildProcess videoEncoder;
+            const auto videoEncoded = videoEncoder.start (juce::StringArray { ffmpeg, "-v", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=black:s=160x90:r=24:d=1", "-i",
+                stereoFile.getFullPathName(), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-t", "1", videoFile.getFullPathName() })
+                && videoEncoder.waitForProcessToFinish (10000) && videoEncoder.getExitCode() == 0;
+            expect (videoEncoded && videoFile.existsAsFile(), "encode synthetic " + videoFile.getFileExtension() + " fixture");
+            if (! videoEncoded) std::cerr << videoEncoder.readAllProcessOutput() << '\n';
+        }
+        juce::ChildProcess monoVideoEncoder;
+        const auto monoVideoEncoded = monoVideoEncoder.start (juce::StringArray { ffmpeg, "-v", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=160x90:r=24:d=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+            monoVideoFile.getFullPathName() })
+            && monoVideoEncoder.waitForProcessToFinish (10000) && monoVideoEncoder.getExitCode() == 0;
+        expect (monoVideoEncoded && monoVideoFile.existsAsFile(), "encode synthetic mono MP4 fixture");
+        if (! monoVideoEncoded) std::cerr << monoVideoEncoder.readAllProcessOutput() << '\n';
+        juce::ChildProcess silentVideoEncoder;
+        const auto silentVideoEncoded = silentVideoEncoder.start (juce::StringArray { ffmpeg, "-v", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=160x90:r=24:d=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", silentVideoFile.getFullPathName() })
+            && silentVideoEncoder.waitForProcessToFinish (10000) && silentVideoEncoder.getExitCode() == 0;
+        expect (silentVideoEncoded && silentVideoFile.existsAsFile(), "encode synthetic video-only MP4 fixture");
+        if (! silentVideoEncoded) std::cerr << silentVideoEncoder.readAllProcessOutput() << '\n';
+        // Four seconds at 24 fps with a single keyframe and B-frames: every
+        // seek decodes from the start, and decode order differs from display.
+        juce::ChildProcess gopEncoder;
+        const auto gopEncoded = gopEncoder.start (juce::StringArray { ffmpeg, "-v", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=s=320x180:r=24:d=4", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-bf", "2", "-x264-params", "keyint=96:min-keyint=96:scenecut=0", gopVideoFile.getFullPathName() })
+            && gopEncoder.waitForProcessToFinish (10000) && gopEncoder.getExitCode() == 0;
+        expect (gopEncoded && gopVideoFile.existsAsFile(), "encode synthetic long-GOP MP4 fixture");
+        if (! gopEncoded) std::cerr << gopEncoder.readAllProcessOutput() << '\n';
         if (failures != 0) { finish(); return; }
 
         processor = std::make_unique<Processor>();
@@ -137,6 +181,7 @@ public:
         addScreenshot ("WaveformPlayer-fixed-size.png", 700, 400);
         addAction ("host rates and channel layouts", [this] { testRatesAndLayouts(); });
         addAction ("speed controls and automation", [this] { testSpeedControls(); });
+        addAction ("audible position for picture sync", [this] { testAudiblePosition(); });
         addAction ("invalid file request", [this]
         {
             configure (*processor, sourceRate, 2);
@@ -187,6 +232,59 @@ public:
             expect (near (snapshot.fileSampleRate, sourceRate), "MP3 sample rate is decoded correctly");
             expect (output.getMagnitude (0, 0, 2048) > 0.02f, "MP3 PCM reaches plugin output");
             expect (! near (output.getSample (0, 1000), output.getSample (1, 1000), 1.0e-3), "stereo MP3 preserves distinct channels");
+        });
+        for (const auto& videoFile : { mp4File, movFile })
+        {
+            addLoad (videoFile);
+            addAction ("video audio and waveform " + videoFile.getFileExtension(), [this, videoFile]
+            {
+                const auto snapshot = processor->getPlaybackSnapshot();
+                expect (snapshot.isVideo && snapshot.file == videoFile,
+                        videoFile.getFileExtension() + " is identified as video");
+                expect (snapshot.durationSeconds >= 0.95 && snapshot.durationSeconds <= 1.1,
+                        videoFile.getFileExtension() + " has a valid media duration");
+                expect (snapshot.fileChannels == 2 && near (snapshot.fileSampleRate, sourceRate),
+                        videoFile.getFileExtension() + " preserves the audio format");
+                expect (snapshot.videoWaveform != nullptr && ! snapshot.videoWaveform->empty(),
+                        videoFile.getFileExtension() + " provides waveform data");
+                processor->setGainDecibels (0.0f);
+                processor->setMuted (false);
+                processor->setPlaybackSpeed (1);
+                processor->seekToSeconds (0.1);
+                processor->play();
+                expect (processor->getPlaybackSnapshot().playing
+                            && ! processor->getPlaybackSnapshot().renderedPlaying,
+                        videoFile.getFileExtension() + " waits for an audio callback before video starts");
+                expect (render (*processor, 1024).getMagnitude (0, 0, 1024) > 0.01f,
+                        videoFile.getFileExtension() + " audio reaches the host output");
+                expect (processor->getPlaybackSnapshot().renderedPlaying,
+                        videoFile.getFileExtension() + " reports playback after the audio callback");
+                processor->pause();
+            });
+        }
+        addVideoFrameTests();
+        addLoad (monoVideoFile);
+        addAction ("mono MP4 audio", [this]
+        {
+            const auto snapshot = processor->getPlaybackSnapshot();
+            expect (snapshot.isVideo && snapshot.fileChannels == 1, "mono MP4 keeps one audio channel");
+            processor->seekToSeconds (0.1);
+            processor->play();
+            expect (render (*processor, 1024).getMagnitude (0, 0, 1024) > 0.01f,
+                    "mono MP4 audio reaches the host output");
+            processor->pause();
+        });
+        addAction ("reject video without audio", [this]
+        {
+            processor->loadAudioFile (silentVideoFile);
+        });
+        addWait ("video-only rejection", [this] { return ! processor->getPlaybackSnapshot().loading; });
+        addAction ("retain previous video after rejection", [this]
+        {
+            const auto snapshot = processor->getPlaybackSnapshot();
+            expect (snapshot.loaded && snapshot.file == monoVideoFile && snapshot.isVideo,
+                    "video without audio preserves the current video");
+            expect (snapshot.error.isNotEmpty(), "video without audio reports a load error");
         });
         addLoad (floatFile);
         addAction ("floating-point sample safety", [this] { testFloatSamples(); });
@@ -310,6 +408,50 @@ public:
             const auto snapshot = processor->getPlaybackSnapshot();
             expect (snapshot.loaded && snapshot.file == lastStressFile, "latest concurrent load request wins");
         });
+        const auto mediaPath = juce::SystemStats::getEnvironmentVariable ("WAVEFORM_PLAYER_TEST_MEDIA", {});
+        if (mediaPath.isNotEmpty())
+        {
+            const juce::File mediaFile (mediaPath);
+            addAction ("load supplied video", [this, mediaFile] { processor->loadAudioFile (mediaFile); });
+            addWait ("supplied video audio decoded", [this, mediaFile]
+            {
+                render (*processor, 128);
+                const auto snapshot = processor->getPlaybackSnapshot();
+                return ! snapshot.loading && snapshot.loaded && snapshot.isVideo && snapshot.file == mediaFile;
+            });
+            addAction ("open supplied video preview", [this, mediaFile]
+            {
+                frameView = std::make_unique<VideoFrameView>();
+                frameView->setSize (720, 440);
+                frameView->open (mediaFile);
+            });
+            addWait ("supplied video frame at 30 seconds", [this]
+            {
+                frameView->showTime (30.0, false, 1.0);
+                const auto shown = frameView->getDisplayedFrameSeconds();
+                return shown >= 30.0 - 1.0 / 24.0 - 0.001 && shown <= 30.001;
+            });
+            addAction ("start supplied video playback clock", [this]
+            {
+                videoClockStartedAt = juce::Time::getMillisecondCounterHiRes();
+                videoRestartsBeforeJitter = frameView->getDecoderRestartCount();
+                videoFramesSeen = 0;
+            });
+            addWait ("supplied video keeps advancing under clock jitter", [this]
+            {
+                const auto elapsed = (juce::Time::getMillisecondCounterHiRes() - videoClockStartedAt) / 1000.0;
+                const auto before = frameView->getDisplayedFrameSeconds();
+                // Simulate a small backwards correction from a busy host.
+                const auto jitter = static_cast<int> (elapsed * 1000.0) / 125 % 2 == 0 ? 0.025 : 0.0;
+                frameView->showTime (30.0 + elapsed - jitter, true, 1.0);
+                if (frameView->getDisplayedFrameSeconds() != before) ++videoFramesSeen;
+                if (elapsed < 2.0) return false;
+                expect (videoFramesSeen >= 25, "supplied video advances through at least 25 frames in two seconds");
+                expect (frameView->getDecoderRestartCount() == videoRestartsBeforeJitter,
+                        "supplied video keeps one reader despite clock jitter");
+                return true;
+            });
+        }
         startedAt = juce::Time::getMillisecondCounterHiRes();
         stageStartedAt = startedAt;
         startTimer (5);
@@ -320,6 +462,7 @@ public:
         stopTimer();
         stopStress();
         editor.reset();
+        frameView.reset();
         restored.reset();
         processor.reset();
         fixtureDirectory.deleteRecursively();
@@ -332,7 +475,13 @@ private:
     std::unique_ptr<juce::AudioProcessorEditor> editor;
     juce::MemoryBlock savedState;
     Processor::PlaybackSnapshot beforeInvalid, beforeChooser;
-    juce::File fixtureDirectory, stereoFile, monoFile, shortFile, flacFile, mp3File, floatFile, invalidFile;
+    juce::File fixtureDirectory, stereoFile, monoFile, shortFile, flacFile, mp3File, mp4File, movFile,
+               monoVideoFile, silentVideoFile, gopVideoFile, floatFile, invalidFile;
+    std::unique_ptr<VideoFrameView> frameView;
+    double videoClockStartedAt = 0.0, videoLatestLead = -1.0;
+    int videoFramesSeen = 0;
+    bool videoCaughtUp = false;
+    std::uint64_t videoRestartsBeforeJitter = 0;
     int checks = 0, failures = 0, callbacks = 0;
     double startedAt = 0.0, stageStartedAt = 0.0, screenshotReadyAt = 0.0;
     float gainBeforeHostMute = 0.0f;
@@ -421,6 +570,160 @@ private:
         target.setRateAndBufferSizeDetails (rate, 256);
         target.prepareToPlay (rate, 256);
         render (target, 1);
+    }
+
+    void testAudiblePosition()
+    {
+        configure (*processor, sourceRate, 2);
+        processor->setPlaybackSpeed (1);
+        processor->setLooping (false);
+        const auto previousSeekRevision = processor->getPlaybackSnapshot().pictureSeekRevision;
+        processor->seekToSeconds (2.0);
+        processor->play();
+        auto snapshot = processor->getPlaybackSnapshot();
+        expect (! snapshot.renderedSeekReady && snapshot.pictureSeekRevision > previousSeekRevision,
+                "picture waits for the audio callback after an explicit seek");
+        render (*processor, 480);
+        snapshot = processor->getPlaybackSnapshot();
+        expect (snapshot.renderedSeekReady, "picture resumes after the audio callback applies the seek");
+        expect (near (snapshot.positionSeconds, 2.01), "rendered position advances by one block");
+        expect (near (snapshot.renderedPositionSeconds, 2.0, 1.0e-6),
+                "picture holds at the seek target until it is audible");
+
+        for (int block = 0; block != 4; ++block)
+            render (*processor, 480);
+        snapshot = processor->getPlaybackSnapshot();
+        expect (snapshot.renderedPositionSeconds >= 2.03 - 1.0e-9
+                    && snapshot.renderedPositionSeconds <= snapshot.positionSeconds,
+                "picture trails the rendered audio by two buffers");
+
+        processor->setOutputDeviceLatencySamples (4800);
+        render (*processor, 480);
+        snapshot = processor->getPlaybackSnapshot();
+        expect (near (snapshot.renderedPositionSeconds, 2.0, 1.0e-6),
+                "device latency delays the picture, never before the seek target");
+        processor->setOutputDeviceLatencySamples (0);
+        processor->pause();
+        render (*processor, 64);
+        snapshot = processor->getPlaybackSnapshot();
+        expect (near (snapshot.renderedPositionSeconds, snapshot.positionSeconds),
+                "paused picture position matches the transport");
+    }
+
+    // Drives the frame view the way the editor does, with a synthetic clock.
+    void addVideoFrameTests()
+    {
+        constexpr double frame = 1.0 / 24.0;
+        const auto showsFrameAt = [this] (double seconds)
+        {
+            frameView->showTime (seconds, false, 1.0);
+            const auto shown = frameView->getDisplayedFrameSeconds();
+            return shown >= seconds - frame - 1.0e-3 && shown <= seconds + 1.0e-3;
+        };
+        addAction ("open long-GOP video frames", [this]
+        {
+            frameView = std::make_unique<VideoFrameView>();
+            frameView->setSize (320, 180);
+            frameView->open (gopVideoFile);
+        });
+        addWait ("paused frame in the middle of a GOP", [showsFrameAt] { return showsFrameAt (2.5); });
+        addAction ("brief audio clock regression", [this]
+        {
+            videoRestartsBeforeJitter = frameView->getDecoderRestartCount();
+            videoClockStartedAt = juce::Time::getMillisecondCounterHiRes();
+            frameView->showTime (2.47, true, 1.0);
+        });
+        addWait ("brief regression keeps the video reader", [this]
+        {
+            frameView->showTime (2.5, true, 1.0);
+            if (juce::Time::getMillisecondCounterHiRes() - videoClockStartedAt < 150.0)
+                return false;
+            expect (frameView->getDecoderRestartCount() == videoRestartsBeforeJitter,
+                    "sub-frame clock jitter does not restart video decoding");
+            return true;
+        });
+        addAction ("explicit sub-frame seek", [this]
+        {
+            videoRestartsBeforeJitter = frameView->getDecoderRestartCount();
+            frameView->showTime (2.47, false, 1.0, 1);
+        });
+        addWait ("explicit sub-frame seek shows the preceding frame", [this]
+        {
+            frameView->showTime (2.47, false, 1.0, 1);
+            const auto shown = frameView->getDisplayedFrameSeconds();
+            if (shown < 2.47 - 1.0 / 24.0 - 0.001 || shown > 2.471)
+                return false;
+            expect (frameView->getDecoderRestartCount() > videoRestartsBeforeJitter,
+                    "explicit seek restarts the reader even within clock jitter tolerance");
+            return true;
+        });
+        addWait ("paused frame after a backward jump", [showsFrameAt] { return showsFrameAt (0.5); });
+        addAction ("start waveform drag", [this]
+        {
+            videoClockStartedAt = juce::Time::getMillisecondCounterHiRes();
+            videoRestartsBeforeJitter = frameView->getDecoderRestartCount();
+            videoFramesSeen = 0;
+        });
+        addWait ("dragging keeps the picture moving", [this]
+        {
+            // Dragging the waveform seeks on every mouse move (~60 per second),
+            // here forward at half speed through the single long GOP.
+            const auto elapsed = (juce::Time::getMillisecondCounterHiRes() - videoClockStartedAt) / 1000.0;
+            const auto before = frameView->getDisplayedFrameSeconds();
+            frameView->showTime (0.5 + 0.5 * elapsed, false, 1.0, 1000 + static_cast<std::uint64_t> (elapsed * 60.0));
+            if (frameView->getDisplayedFrameSeconds() != before) ++videoFramesSeen;
+            if (elapsed < 1.5) return false;
+            expect (videoFramesSeen >= 10, "dragging shows new frames (" + juce::String (videoFramesSeen) + ")");
+            expect (frameView->getDecoderRestartCount() - videoRestartsBeforeJitter <= 1,
+                    "dragging forward decodes through instead of restarting per mouse move");
+            return true;
+        });
+        addWait ("paused frame after a forward jump", [showsFrameAt] { return showsFrameAt (3.9); });
+        for (const auto speed : { 1, 8 })
+        {
+            addAction ("start " + juce::String (speed) + "x video clock", [this]
+            {
+                videoClockStartedAt = juce::Time::getMillisecondCounterHiRes();
+                videoLatestLead = -1.0;
+                videoFramesSeen = 0;
+                videoCaughtUp = false;
+            });
+            addWait (juce::String (speed) + "x video follows the clock", [this, speed]
+            {
+                const auto start = speed == 1 ? 1.0 : 0.2;
+                const auto elapsed = (juce::Time::getMillisecondCounterHiRes() - videoClockStartedAt) / 1000.0;
+                const auto clock = juce::jmin (3.95, start + speed * elapsed);
+                const auto before = frameView->getDisplayedFrameSeconds();
+                frameView->showTime (clock, true, speed);
+                const auto shown = frameView->getDisplayedFrameSeconds();
+                if (shown != before) ++videoFramesSeen;
+                // The previous position stays on screen until the restarted
+                // decoder delivers; measure only once the clock is followed.
+                videoCaughtUp = videoCaughtUp || shown <= clock + 1.0e-3;
+                if (videoCaughtUp)
+                    videoLatestLead = juce::jmax (videoLatestLead, shown - clock);
+                if (clock < 3.95) return false;
+                expect (videoLatestLead <= 1.0e-3, juce::String (speed) + "x video is never ahead of the audio clock (lead "
+                        + juce::String (videoLatestLead, 4) + " s)");
+                expect (shown >= 3.95 - 2.0 * frame, juce::String (speed) + "x video reaches the clock position");
+                expect (videoFramesSeen >= (speed == 1 ? 40 : 3),
+                        juce::String (speed) + "x video advances frame by frame (" + juce::String (videoFramesSeen) + ")");
+                return true;
+            });
+        }
+        addAction ("video frames reject audio-only files", [this]
+        {
+            frameView = std::make_unique<VideoFrameView>();
+            frameView->open (stereoFile);
+        });
+        addWait ("audio-only video error", [this]
+        {
+            frameView->showTime (0.0, false, 1.0);
+            if (frameView->getError().isEmpty()) return false;
+            expect (frameView->getDisplayedFrameSeconds() < 0.0, "audio-only file shows no video frame");
+            frameView.reset();
+            return true;
+        });
     }
 
     juce::AudioBuffer<float> render (Processor& target, int frames)

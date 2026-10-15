@@ -1,11 +1,39 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "VideoAudioDecoder.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iterator>
 #include <limits>
+
+namespace
+{
+std::shared_ptr<const std::vector<WaveformPlayerAudioProcessor::WaveformPeak>>
+makeVideoWaveform (const juce::AudioBuffer<float>& samples)
+{
+    using Peak = WaveformPlayerAudioProcessor::WaveformPeak;
+    const auto length = samples.getNumSamples();
+    const auto count = juce::jmin (1024, length);
+    auto peaks = std::make_shared<std::vector<Peak>>();
+    peaks->reserve (static_cast<std::size_t> (count));
+    const auto* channel = samples.getReadPointer (0);
+    for (int index = 0; index < count; ++index)
+    {
+        const auto first = static_cast<int> (static_cast<juce::int64> (index) * length / count);
+        const auto end = static_cast<int> (static_cast<juce::int64> (index + 1) * length / count);
+        auto low = channel[first], high = channel[first];
+        for (int sample = first + 1; sample < end; ++sample)
+        {
+            low = juce::jmin (low, channel[sample]);
+            high = juce::jmax (high, channel[sample]);
+        }
+        peaks->push_back ({ low, high });
+    }
+    return peaks;
+}
+}
 
 juce::AudioProcessorValueTreeState::ParameterLayout
 WaveformPlayerAudioProcessor::createParameterLayout()
@@ -36,7 +64,7 @@ WaveformPlayerAudioProcessor::WaveformPlayerAudioProcessor()
     loopParameter = parameters.getRawParameterValue ("loop");
     muteParameter = parameters.getRawParameterValue ("mute");
     speedParameter = parameters.getRawParameterValue ("speed");
-    metadata.status = "Open an audio file";
+    metadata.status = "Open a media file";
     outputGain.setCurrentAndTargetValue (1.0f);
     loaderThread = std::thread ([this] { loaderLoop(); });
 }
@@ -171,6 +199,7 @@ void WaveformPlayerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
         audioTransportRevision = 0;
         audioSeekRevision = 0;
         audioMarkers = {{ -1, -1 }};
+        outputSamplesSinceJump = 0;
     }
 
     const auto sourceLength = asset->samples.getNumSamples();
@@ -185,9 +214,12 @@ void WaveformPlayerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
                                                               commands.seekSeconds) * asset->sampleRate);
             sourcePosition = static_cast<double> (juce::jlimit (bounds.first, bounds.second, seekSample));
             audioSeekRevision = commands.seekRevision;
+            outputSamplesSinceJump = 0;
         }
         if (commands.transportRevision != audioTransportRevision)
         {
+            if (commands.shouldPlay && ! audioPlaying)
+                outputSamplesSinceJump = 0;
             audioPlaying = commands.shouldPlay;
             if (audioPlaying && (sourcePosition < bounds.first || sourcePosition >= bounds.second))
                 sourcePosition = static_cast<double> (bounds.first);
@@ -221,6 +253,7 @@ void WaveformPlayerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
             continue;
         if (sourcePosition >= end)
         {
+            outputSamplesSinceJump = 0;
             if (looping)
                 sourcePosition = start + std::fmod (sourcePosition - start, rangeLength);
             else
@@ -253,8 +286,10 @@ void WaveformPlayerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
             outLeft[sample] = toFiniteFloat (0.5 * (leftSample + rightSample));
         }
         sourcePosition += increment;
+        ++outputSamplesSinceJump;
         if (sourcePosition >= end)
         {
+            outputSamplesSinceJump = 0;
             if (looping)
                 sourcePosition = start + std::fmod (sourcePosition - start, rangeLength);
             else
@@ -266,6 +301,27 @@ void WaveformPlayerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
     }
 
     reportedPositionSeconds.store (sourcePosition / asset->sampleRate, std::memory_order_relaxed);
+
+    // A rendered sample is heard roughly one buffer after the callback that
+    // delivers it, plus device latency. The callback runs about one buffer
+    // ahead, so the speaker trails the block end by two buffers and the device
+    // latency. Audio rendered before the last jump (seek, loop or start) never
+    // reaches the picture: the picture holds at the jump until it is audible.
+    const auto latency = 2 * static_cast<juce::int64> (buffer.getNumSamples())
+                       + juce::jmax (0, outputDeviceLatencySamples.load (std::memory_order_relaxed));
+    const auto lag = audioPlaying ? juce::jmin (latency, outputSamplesSinceJump) : juce::int64 { 0 };
+    const auto epoch = audibleEpoch.load (std::memory_order_relaxed);
+    audibleEpoch.store (epoch + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence (std::memory_order_release);
+    audibleSeconds.store ((sourcePosition - static_cast<double> (lag) * increment) / asset->sampleRate,
+                          std::memory_order_relaxed);
+    audibleLimitSeconds.store (sourcePosition / asset->sampleRate, std::memory_order_relaxed);
+    audibleSpeed.store (audioPlaying ? increment * outputSampleRate / asset->sampleRate : 0.0,
+                        std::memory_order_relaxed);
+    audibleCallbackMs.store (juce::Time::getMillisecondCounterHiRes(), std::memory_order_relaxed);
+    audibleHoldMs.store (audioPlaying ? static_cast<double> (latency - lag) * 1000.0 / outputSampleRate : 0.0,
+                         std::memory_order_relaxed);
+    audibleEpoch.store (epoch + 2, std::memory_order_release);
     publishPlaybackState();
     audioHazard.store (nullptr);
 }
@@ -383,6 +439,34 @@ void WaveformPlayerAudioProcessor::setPlaybackSpeed (int multiplier)
         static_cast<float> (std::distance (playbackSpeeds.begin(), choice))));
 }
 
+void WaveformPlayerAudioProcessor::setOutputDeviceLatencySamples (int samples) noexcept
+{
+    outputDeviceLatencySamples.store (juce::jmax (0, samples), std::memory_order_relaxed);
+}
+
+double WaveformPlayerAudioProcessor::getAudiblePositionSeconds (double fallback) const noexcept
+{
+    for (int attempt = 0; attempt != 4; ++attempt)
+    {
+        const auto before = audibleEpoch.load (std::memory_order_acquire);
+        if ((before & 1u) != 0)
+            continue;
+        const auto seconds = audibleSeconds.load (std::memory_order_relaxed);
+        const auto limit = audibleLimitSeconds.load (std::memory_order_relaxed);
+        const auto speed = audibleSpeed.load (std::memory_order_relaxed);
+        const auto callbackMs = audibleCallbackMs.load (std::memory_order_relaxed);
+        const auto holdMs = audibleHoldMs.load (std::memory_order_relaxed);
+        std::atomic_thread_fence (std::memory_order_acquire);
+        if (before != audibleEpoch.load (std::memory_order_relaxed))
+            continue;
+        // Advance with wall time between callbacks, but never past audio that
+        // has not been rendered yet; a stalled host leaves the picture there.
+        const auto elapsedMs = juce::jmax (0.0, juce::Time::getMillisecondCounterHiRes() - callbackMs - holdMs);
+        return juce::jmin (limit, seconds + speed * elapsedMs / 1000.0);
+    }
+    return fallback;
+}
+
 int WaveformPlayerAudioProcessor::getPlaybackSpeed() const noexcept
 {
     const auto value = speedParameter->load (std::memory_order_relaxed);
@@ -413,6 +497,8 @@ WaveformPlayerAudioProcessor::PlaybackSnapshot WaveformPlayerAudioProcessor::get
 
     result.positionSeconds = reportedPositionSeconds.load (std::memory_order_relaxed);
     result.playing = reportedPlaying.load (std::memory_order_relaxed);
+    result.renderedPositionSeconds = getAudiblePositionSeconds (result.positionSeconds);
+    result.renderedPlaying = result.playing;
     const std::lock_guard<std::mutex> lock (controlMutex);
     result.markerSamples = {{ requestedMarkerA.load(), requestedMarkerB.load() }};
     const auto bounds = playbackBounds (result.markerSamples,
@@ -420,7 +506,10 @@ WaveformPlayerAudioProcessor::PlaybackSnapshot WaveformPlayerAudioProcessor::get
     result.rangeStartSeconds = bounds.first / result.fileSampleRate;
     result.rangeEndSeconds = bounds.second / result.fileSampleRate;
     const bool pendingAsset = reportedAssetRevision.load (std::memory_order_relaxed) != result.fileRevision;
-    if (pendingAsset || seekCommandRevision.load() != appliedSeekRevision.load (std::memory_order_relaxed))
+    result.renderedAssetReady = ! pendingAsset;
+    result.pictureSeekRevision = seekCommandRevision.load();
+    result.renderedSeekReady = result.pictureSeekRevision == appliedSeekRevision.load (std::memory_order_relaxed);
+    if (pendingAsset || ! result.renderedSeekReady)
         result.positionSeconds = requestedSeekSeconds.load();
     if (pendingAsset || transportCommandRevision.load() != appliedTransportRevision.load (std::memory_order_relaxed))
         result.playing = requestedPlaying.load();
@@ -438,8 +527,8 @@ void WaveformPlayerAudioProcessor::chooseAudioFile (bool useNativeDialog)
         return;
 
     fileChooser = std::make_unique<juce::FileChooser> (
-        "Open audio file", juce::File::getSpecialLocation (juce::File::userMusicDirectory),
-        "*.wav;*.mp3;*.flac", useNativeDialog);
+        "Open audio or video file", juce::File::getSpecialLocation (juce::File::userMusicDirectory),
+        "*.wav;*.mp3;*.flac;*.mp4;*.mov", useNativeDialog);
     choosingFile.store (true, std::memory_order_relaxed);
     try
     {
@@ -472,7 +561,7 @@ void WaveformPlayerAudioProcessor::requestAudioFile (const juce::File& file, dou
         const std::lock_guard<std::mutex> metadataLock (metadataMutex);
         metadata.loading = true;
         metadata.error.clear();
-        metadata.status = clear ? "Clearing audio file" : "Loading " + file.getFileName() + "...";
+        metadata.status = clear ? "Clearing media file" : "Loading " + file.getFileName() + "...";
     }
     requestCondition.notify_one();
 }
@@ -483,13 +572,30 @@ WaveformPlayerAudioProcessor::decodeFile (const LoadRequest& request, juce::Audi
 {
     if (! request.file.existsAsFile())
     {
-        error = "The audio file could not be found.";
+        error = "The media file could not be found.";
         return {};
+    }
+    const auto isVideo = request.file.hasFileExtension ("mp4") || request.file.hasFileExtension ("mov");
+    if (isVideo)
+    {
+        auto video = decodeVideoAudio (request.file, error, [this, &request]
+        {
+            return shuttingDown.load() || request.revision != latestRequestRevision.load();
+        });
+        if (video == nullptr)
+            return {};
+        auto decoded = std::make_unique<DecodedAudio>();
+        decoded->samples = std::move (video->samples);
+        decoded->sampleRate = video->sampleRate;
+        decoded->revision = request.revision;
+        decoded->isVideo = true;
+        decoded->videoWaveform = makeVideoWaveform (decoded->samples);
+        return decoded;
     }
     auto reader = std::unique_ptr<juce::AudioFormatReader> (manager.createReaderFor (request.file));
     if (reader == nullptr)
     {
-        error = "The audio file is unsupported or could not be decoded. Choose WAV, MP3 or FLAC.";
+        error = "The file is unsupported or could not be decoded. Choose WAV, MP3, FLAC, MP4 or MOV.";
         return {};
     }
     if (reader->numChannels < 1 || reader->numChannels > 2)
@@ -571,11 +677,14 @@ void WaveformPlayerAudioProcessor::publishAudio (std::unique_ptr<DecodedAudio> d
         nextMetadata.file = request.file;
         nextMetadata.fileName = request.file.getFileName();
         nextMetadata.fileSampleRate = decoded->sampleRate;
+        nextMetadata.fileChannels = decoded->samples.getNumChannels();
+        nextMetadata.isVideo = decoded->isVideo;
+        nextMetadata.videoWaveform = decoded->videoWaveform;
         nextMetadata.durationSeconds = decoded->samples.getNumSamples() / decoded->sampleRate;
     }
     nextMetadata.fileRevision = request.revision;
     nextMetadata.error.clear();
-    nextMetadata.status = decoded != nullptr ? "Ready" : "Open an audio file";
+    nextMetadata.status = decoded != nullptr ? "Ready" : "Open a media file";
     if (currentOwnedAudio != nullptr)
         retiredAudio.reserve (retiredAudio.size() + 1);
     {
@@ -642,11 +751,11 @@ void WaveformPlayerAudioProcessor::loaderLoop()
         }
         catch (const std::bad_alloc&)
         {
-            error = "There is not enough memory to load this audio file.";
+            error = "There is not enough memory to load this media file.";
         }
         catch (...)
         {
-            error = "The audio file could not be loaded.";
+            error = "The media file could not be loaded.";
         }
         if (decoded == nullptr)
         {
@@ -655,7 +764,7 @@ void WaveformPlayerAudioProcessor::loaderLoop()
             {
                 const std::lock_guard<std::mutex> metadataLock (metadataMutex);
                 metadata.loading = false;
-                metadata.error = error.isNotEmpty() ? error : "The audio file could not be loaded.";
+                metadata.error = error.isNotEmpty() ? error : "The media file could not be loaded.";
                 metadata.status = metadata.error;
             }
         }

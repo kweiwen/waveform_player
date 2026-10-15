@@ -16,6 +16,7 @@ public:
 private:
     class PlayerLookAndFeel;
     class WaveformDisplay;
+    class VideoWindow;
 
     void timerCallback() override;
     void updateFromProcessor();
@@ -25,10 +26,12 @@ private:
     juce::Typeface::Ptr interfaceTypeface;
     std::unique_ptr<PlayerLookAndFeel> playerLookAndFeel;
     std::unique_ptr<WaveformDisplay> waveform;
+    std::unique_ptr<VideoWindow> videoWindow;
+    std::uint64_t videoWindowRevision = 0;
     juce::TooltipWindow tooltips { this, 650 };
 
     juce::TextButton openButton, rewindButton, playButton, pauseButton, stopButton,
-                     forwardButton, loopButton, speedButton, muteButton, minimumVolumeButton;
+                     forwardButton, loopButton, speedButton, muteButton, minimumVolumeButton, videoButton;
     juce::Slider volumeSlider;
     juce::Label titleLabel, subtitleLabel, volumeValueLabel;
     juce::Rectangle<int> volumePanelBounds;

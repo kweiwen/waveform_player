@@ -14,6 +14,12 @@
 class WaveformPlayerAudioProcessor : public juce::AudioProcessor
 {
 public:
+    struct WaveformPeak
+    {
+        float minimum = 0.0f;
+        float maximum = 0.0f;
+    };
+
     struct PlaybackSnapshot
     {
         bool loaded = false;
@@ -21,8 +27,16 @@ public:
         bool choosingFile = false;
         bool playing = false;
         double positionSeconds = 0.0;
+        double renderedPositionSeconds = 0.0;
         double durationSeconds = 0.0;
         double fileSampleRate = 0.0;
+        int fileChannels = 0;
+        bool isVideo = false;
+        bool renderedPlaying = false;
+        bool renderedAssetReady = false;
+        bool renderedSeekReady = false;
+        std::uint64_t pictureSeekRevision = 0;
+        std::shared_ptr<const std::vector<WaveformPeak>> videoWaveform;
         std::array<juce::int64, 2> markerSamples {{ -1, -1 }};
         double rangeStartSeconds = 0.0;
         double rangeEndSeconds = 0.0;
@@ -79,6 +93,9 @@ public:
     void setPlaybackSpeed (int multiplier);
     int getPlaybackSpeed() const noexcept;
     void cyclePlaybackSpeed();
+    // Message thread. Output latency beyond the audio buffers, when known
+    // (standalone device latency); hosts do not report it to plugins.
+    void setOutputDeviceLatencySamples (int samples) noexcept;
 
     // Snapshot strings/files are copied under a non-audio-thread metadata lock.
     PlaybackSnapshot getPlaybackSnapshot() const;
@@ -91,6 +108,8 @@ private:
         juce::AudioBuffer<float> samples;
         double sampleRate = 0.0;
         std::uint64_t revision = 0;
+        bool isVideo = false;
+        std::shared_ptr<const std::vector<WaveformPeak>> videoWaveform;
     };
 
     struct LoadRequest
@@ -168,6 +187,7 @@ private:
     std::uint64_t audioAssetRevision = 0;
     std::uint64_t audioTransportRevision = 0;
     std::uint64_t audioSeekRevision = 0;
+    juce::int64 outputSamplesSinceJump = 0;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> outputGain;
 
     std::atomic<double> reportedPositionSeconds { 0.0 };
@@ -175,6 +195,17 @@ private:
     std::atomic<std::uint64_t> reportedAssetRevision { 0 };
     std::atomic<std::uint64_t> appliedTransportRevision { 0 };
     std::atomic<std::uint64_t> appliedSeekRevision { 0 };
+
+    // Audible position for picture sync, written by the audio callback under a
+    // sequence counter so the reader sees one callback's values together.
+    std::atomic<int> outputDeviceLatencySamples { 0 };
+    std::atomic<std::uint64_t> audibleEpoch { 0 };
+    std::atomic<double> audibleSeconds { 0.0 };
+    std::atomic<double> audibleLimitSeconds { 0.0 };
+    std::atomic<double> audibleSpeed { 0.0 };
+    std::atomic<double> audibleCallbackMs { 0.0 };
+    std::atomic<double> audibleHoldMs { 0.0 };
+    double getAudiblePositionSeconds (double fallback) const noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaveformPlayerAudioProcessor)
 };

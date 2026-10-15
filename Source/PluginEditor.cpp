@@ -1,5 +1,10 @@
 #include "PluginEditor.h"
 #include "BinaryData.h"
+#include "VideoFrameView.h"
+
+#if JucePlugin_Build_Standalone
+ #include <juce_audio_plugin_client/Standalone/juce_StandaloneFilterWindow.h>
+#endif
 
 namespace
 {
@@ -244,11 +249,17 @@ public:
             displayedRevision = snapshot.fileRevision;
             thumbnail.clear();
             thumbnailCache.clear();
-            // AudioThumbnail performs decoding and file reads on its background thread.
-            thumbnailAvailable = thumbnail.setSource (new juce::FileInputSource (displayedFile, true));
+            // Video audio has already been decoded by the processor. Keep its
+            // compact waveform rather than asking AudioThumbnail to open a movie.
+            videoWaveform = snapshot.isVideo ? snapshot.videoWaveform : nullptr;
+            thumbnailAvailable = snapshot.isVideo
+                ? videoWaveform != nullptr
+                : thumbnail.setSource (new juce::FileInputSource (displayedFile, true));
         }
 
         loaded = snapshot.loaded;
+        isVideo = snapshot.isVideo;
+        fileChannels = snapshot.fileChannels;
         loading = snapshot.loading;
         choosingFile = snapshot.choosingFile;
         if (! loaded || loading || choosingFile)
@@ -264,12 +275,12 @@ public:
             position = snapshot.positionSeconds;
         else
             position = juce::jlimit (rangeStart, rangeEnd, position);
-        fileNameLabel.setText (snapshot.loaded ? snapshot.fileName : "No audio file loaded", juce::dontSendNotification);
+        fileNameLabel.setText (snapshot.loaded ? snapshot.fileName : "No media file loaded", juce::dontSendNotification);
         const auto filePath = snapshot.loaded ? snapshot.file.getFullPathName() : juce::String();
         fileNameLabel.setTooltip (filePath);
         fileNameLabel.setDescription (filePath);
         const auto status = snapshot.error.isNotEmpty() ? snapshot.error
-                          : snapshot.status.isNotEmpty() ? snapshot.status : "Choose a WAV, MP3 or FLAC file";
+                          : snapshot.status.isNotEmpty() ? snapshot.status : "Choose a WAV, MP3, FLAC, MP4 or MOV file";
         fileStatusLabel.setText (status, juce::dontSendNotification);
         fileStatusLabel.setTooltip (status);
         fileStatusLabel.setDescription (status);
@@ -298,7 +309,7 @@ public:
         g.drawText (formatTime (position) + " / " + formatTime (duration),
                     heading.removeFromRight (timeWidth), juce::Justification::centredRight);
 
-        const auto channelCount = juce::jmax (1, thumbnail.getNumChannels());
+        const auto channelCount = juce::jmax (1, isVideo ? fileChannels : thumbnail.getNumChannels());
         auto information = getLocalBounds().reduced (16, 0).withTrimmedTop (28).removeFromTop (18);
         g.setFont (interfaceFont (interfaceTypeface, 11.0f));
         g.setColour (textSecondary);
@@ -335,7 +346,21 @@ public:
                 g.fillRect (bounds.withRight (x));
             }
 
-            if (thumbnail.getNumChannels() > 0)
+            if (isVideo && videoWaveform != nullptr && ! videoWaveform->empty())
+            {
+                g.setColour (accent.withAlpha (loading ? 0.35f : 0.85f));
+                const auto count = static_cast<int> (videoWaveform->size());
+                const auto centre = bounds.getCentreY();
+                const auto halfHeight = bounds.getHeight() * 0.45f;
+                for (int index = 0; index < count; ++index)
+                {
+                    const auto x = bounds.getX() + bounds.getWidth() * index / count;
+                    const auto& peak = (*videoWaveform)[static_cast<std::size_t> (index)];
+                    g.drawVerticalLine (juce::roundToInt (x),
+                        centre - peak.maximum * halfHeight, centre - peak.minimum * halfHeight);
+                }
+            }
+            else if (thumbnail.getNumChannels() > 0)
             {
                 g.setColour (accent.withAlpha (loading ? 0.35f : 0.85f));
                 // Only channel 0 is visualised; stereo audio output is unchanged.
@@ -378,16 +403,16 @@ public:
         {
             g.setColour (textSecondary);
             g.setFont (interfaceFont (interfaceTypeface, 14.0f));
-            g.drawFittedText (juce::String::fromUTF8 (loading ? "Loading audio…"
+            g.drawFittedText (juce::String::fromUTF8 (loading ? "Loading media…"
                               : loaded ? thumbnailAvailable ? "Building waveform…" : "Waveform unavailable"
-                                       : "Open an audio file to begin"),
+                                       : "Open a media file to begin"),
                               bounds.toNearestInt(), juce::Justification::centred, 1);
         }
 
         auto footer = getLocalBounds().reduced (16, 0).removeFromBottom (25);
         g.setFont (interfaceFont (interfaceTypeface, 11.0f));
         g.setColour (textSecondary);
-        g.drawText (juce::String::fromUTF8 (loaded ? "Right-click: A/B · Shift-right-click: clear" : "WAV · MP3 · FLAC"), footer,
+        g.drawText (juce::String::fromUTF8 (loaded ? "Right-click: A/B · Shift-right-click: clear" : "WAV · MP3 · FLAC · MP4 · MOV"), footer,
                     juce::Justification::centredLeft);
     }
 
@@ -468,10 +493,69 @@ private:
     uint64_t displayedRevision = 0;
     static constexpr int timeWidth = 260;
     bool loaded = false, loading = false, choosingFile = false, dragging = false, thumbnailAvailable = false;
+    bool isVideo = false;
+    int fileChannels = 0;
+    std::shared_ptr<const std::vector<WaveformPlayerAudioProcessor::WaveformPeak>> videoWaveform;
     int playbackSpeed = 1;
     double position = 0.0, duration = 0.0, sampleRate = 0.0;
     double rangeStart = 0.0, rangeEnd = 0.0;
     std::array<juce::int64, 2> markerSamples {{ -1, -1 }};
+};
+
+class WaveformPlayerAudioProcessorEditor::VideoWindow final : public juce::DocumentWindow
+{
+public:
+    VideoWindow (const juce::File& file, WaveformPlayerAudioProcessor& processorIn)
+        : juce::DocumentWindow (file.getFileName(), background, juce::DocumentWindow::closeButton),
+          processor (processorIn)
+    {
+        auto content = std::make_unique<VideoFrameView>();
+        video = content.get();
+        setContentOwned (content.release(), false);
+        setUsingNativeTitleBar (true);
+        setResizable (true, true);
+        setResizeLimits (320, 220, 1920, 1200);
+        centreWithSize (720, 440);
+        setVisible (true);
+        video->open (file);
+    }
+
+    void closeButtonPressed() override { setVisible (false); }
+
+    void showVideo()
+    {
+        setVisible (true);
+        toFront (true);
+    }
+
+private:
+    // The picture follows the audible audio position on every display refresh.
+    void update()
+    {
+        if (! isVisible())
+            return;
+        const auto snapshot = processor.getPlaybackSnapshot();
+        if (! snapshot.loaded || ! snapshot.isVideo)
+            return;
+        // Follow the audio only once processBlock has advanced this asset.
+        // The UI's optimistic transport state can precede the audio callback.
+        const auto playing = snapshot.playing && snapshot.renderedAssetReady
+                          && snapshot.renderedSeekReady && snapshot.renderedPlaying;
+        video->showTime (juce::jlimit (0.0, snapshot.durationSeconds,
+                                       playing ? snapshot.renderedPositionSeconds : snapshot.positionSeconds),
+                         playing, snapshot.playbackSpeed, snapshot.pictureSeekRevision);
+        if (! reportedError)
+            if (const auto error = video->getError(); error.isNotEmpty())
+            {
+                setName ("Video unavailable: " + error);
+                reportedError = true;
+            }
+    }
+
+    WaveformPlayerAudioProcessor& processor;
+    VideoFrameView* video = nullptr;
+    bool reportedError = false;
+    juce::VBlankAttachment vblank { this, [this] { update(); } };
 };
 
 WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (WaveformPlayerAudioProcessor& processor)
@@ -490,7 +574,7 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
     titleLabel.setText ("Waveform Player", juce::dontSendNotification);
     titleLabel.setFont (interfaceFont (interfaceTypeface, 25.0f));
     subtitleLabel.setFont (interfaceFont (interfaceTypeface, 12.0f));
-    subtitleLabel.setText ("Standalone audio playback", juce::dontSendNotification);
+    subtitleLabel.setText ("Standalone media playback", juce::dontSendNotification);
     subtitleLabel.setJustificationType (juce::Justification::centredRight);
     volumeValueLabel.setFont (interfaceFont (interfaceTypeface, 14.0f));
     volumeValueLabel.setJustificationType (juce::Justification::centredRight);
@@ -502,7 +586,7 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
         addAndMakeVisible (*label);
     }
 
-    configureButton (openButton, "Open", "Load a WAV, MP3 or FLAC audio file");
+    configureButton (openButton, "Open", "Load a WAV, MP3, FLAC, MP4 or MOV file");
     openButton.setComponentID ("open");
     configureButton (rewindButton, juce::String::fromUTF8 ("RW  −5 s"), "Seek backward by five seconds");
     rewindButton.setComponentID ("rewind");
@@ -514,13 +598,22 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
     stopButton.setComponentID ("stop");
     configureButton (forwardButton, "FF  +5 s", "Seek forward by five seconds");
     forwardButton.setComponentID ("forward");
-    configureButton (loopButton, "Loop Off", "Repeat the whole audio file");
+    configureButton (loopButton, "Loop Off", "Repeat the whole media file");
     loopButton.setComponentID ("loop");
     configureButton (speedButton, "Speed 1x", "Click to cycle playback speed: 1x, 2x, 4x, 8x");
     speedButton.setComponentID ("speed1");
     configureButton (muteButton, {}, "Mute the output without changing the volume setting");
     muteButton.setComponentID ("mute");
     configureButton (minimumVolumeButton, {}, "Set the output volume to its minimum: -60 dB");
+    configureButton (videoButton, "Video", "Show the video in a separate window");
+    videoButton.setComponentID ("video");
+    videoButton.onClick = [this]
+    {
+        if (videoWindow != nullptr)
+        {
+            videoWindow->showVideo();
+        }
+    };
     minimumVolumeButton.setComponentID ("volume-off");
     minimumVolumeButton.setName ("Set volume to minimum");
     minimumVolumeButton.setTitle (minimumVolumeButton.getName());
@@ -572,6 +665,7 @@ WaveformPlayerAudioProcessorEditor::WaveformPlayerAudioProcessorEditor (Waveform
 WaveformPlayerAudioProcessorEditor::~WaveformPlayerAudioProcessorEditor()
 {
     stopTimer();
+    videoWindow.reset();
     tooltips.setLookAndFeel (nullptr);
     setLookAndFeel (nullptr);
 }
@@ -604,8 +698,10 @@ void WaveformPlayerAudioProcessorEditor::resized()
     auto heading = bounds.removeFromTop (headingHeight);
     heading.removeFromRight (43);
     heading.removeFromRight (16);
-    subtitleLabel.setBounds (heading.removeFromRight (270));
-    heading.removeFromRight (16);
+    subtitleLabel.setBounds (heading.removeFromRight (210));
+    heading.removeFromRight (8);
+    videoButton.setBounds (heading.removeFromRight (60));
+    heading.removeFromRight (8);
     titleLabel.setBounds (heading.withTrimmedLeft (8));
     bounds.removeFromTop (8);
 
@@ -644,7 +740,27 @@ void WaveformPlayerAudioProcessorEditor::timerCallback() { updateFromProcessor()
 
 void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
 {
+   #if JucePlugin_Build_Standalone
+    // Only the standalone app owns its device; plugin hosts keep theirs private.
+    if (audioProcessor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
+        if (auto* holder = juce::StandalonePluginHolder::getInstance())
+            if (auto* device = holder->deviceManager.getCurrentAudioDevice())
+                audioProcessor.setOutputDeviceLatencySamples (device->getOutputLatencyInSamples());
+   #endif
     const auto snapshot = audioProcessor.getPlaybackSnapshot();
+    if (snapshot.loaded && snapshot.isVideo && snapshot.fileRevision != videoWindowRevision)
+    {
+        videoWindow.reset();
+        videoWindow = std::make_unique<VideoWindow> (snapshot.file, audioProcessor);
+        videoWindowRevision = snapshot.fileRevision;
+    }
+    else if (! snapshot.isVideo && videoWindow != nullptr)
+    {
+        videoWindow.reset();
+        videoWindowRevision = 0;
+    }
+    videoButton.setVisible (snapshot.loaded && snapshot.isVideo);
+    videoButton.setEnabled (snapshot.loaded && ! snapshot.loading);
     const auto available = snapshot.loaded && ! snapshot.loading && ! snapshot.choosingFile;
     const auto muted = audioProcessor.isMuted();
     openButton.setToggleState (snapshot.choosingFile, juce::dontSendNotification);
@@ -672,7 +788,7 @@ void WaveformPlayerAudioProcessorEditor::updateFromProcessor()
     loopButton.setButtonText (looping ? "Loop On" : "Loop Off");
     loopButton.setName (loopButton.getButtonText());
     const auto hasPair = snapshot.markerSamples[1] >= 0;
-    loopButton.setTooltip (looping ? hasPair ? "Loop On: repeat the A/B range" : "Loop On: repeat the whole audio file"
+    loopButton.setTooltip (looping ? hasPair ? "Loop On: repeat the A/B range" : "Loop On: repeat the whole media file"
                                   : hasPair ? "Loop Off: stop and return to A at B" : "Loop Off: stop and return to the start at the end");
     loopButton.setDescription (loopButton.getTooltip());
     muteButton.setToggleState (muted, juce::dontSendNotification);

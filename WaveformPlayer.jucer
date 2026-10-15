@@ -10,6 +10,14 @@
               companyWebsite="" companyEmail="" displaySplashScreen="1">
   <MAINGROUP id="XmfNSC" name="WaveformPlayer">
     <GROUP id="{CD65132E-0B8E-8DEF-F72A-F18A8BA82BFF}" name="Source">
+      <FILE id="VideoDecoder" name="VideoAudioDecoder.mm" compile="1" resource="0"
+            file="Source/VideoAudioDecoder.mm"/>
+      <FILE id="VideoDecoderH" name="VideoAudioDecoder.h" compile="0" resource="0"
+            file="Source/VideoAudioDecoder.h"/>
+      <FILE id="VideoFrameView" name="VideoFrameView.mm" compile="1" resource="0"
+            file="Source/VideoFrameView.mm"/>
+      <FILE id="VideoFrameViewH" name="VideoFrameView.h" compile="0" resource="0"
+            file="Source/VideoFrameView.h"/>
       <FILE id="EtHo5f" name="PluginProcessor.cpp" compile="1" resource="0"
             file="Source/PluginProcessor.cpp"/>
       <FILE id="MUTON5" name="PluginProcessor.h" compile="0" resource="0"
@@ -52,7 +60,7 @@
                JUCE_USE_MP3AUDIOFORMAT="1" JUCE_USE_FLAC="1" JUCE_WEB_BROWSER="0"
                JUCE_USE_CURL="0"/>
   <EXPORTFORMATS>
-    <XCODE_MAC targetFolder="Builds/MacOSX">
+    <XCODE_MAC targetFolder="Builds/MacOSX" extraFrameworks="AVFoundation,CoreMedia,CoreVideo">
       <CONFIGURATIONS>
         <CONFIGURATION isDebug="1" name="Debug" targetName="WaveformPlayer" macOSDeploymentTarget="11.0"
                        osxArchitecture="Native" enablePluginBinaryCopyStep="0" codeSigningIdentity="-"/>
