@@ -3,7 +3,7 @@
 <JUCERPROJECT id="UN8ocM" name="WaveformPlayer" projectType="audioplug" useAppConfig="0"
               addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" version="1.0.0"
               cppLanguageStandard="17" pluginName="WaveformPlayer" pluginDesc="WaveformPlayer"
-              pluginManufacturer="Captain_Rhodes" pluginManufacturerCode="Manu"
+              pluginManufacturer="yourcompany" pluginManufacturerCode="Manu"
               pluginCode="Un8o" pluginFormats="buildVST3,buildAU,buildStandalone"
               pluginCharacteristicsValue="pluginIsSynth" pluginVST3Category="Instrument,Sampler"
               pluginAUMainType="'augn'" pluginAUExportPrefix="WaveformPlayerAU"
